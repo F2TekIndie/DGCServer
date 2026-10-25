@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
 project(DGCServer VERSION 0.1 LANGUAGES CXX)
 
@@ -23,8 +23,6 @@ add_subdirectory(
 
 add_executable(dgcserver
     server/main.cpp
-    server/asio.h server/asio.cpp
-    src/mqtt.h src/mqtt.cpp
 )
 
 target_link_libraries(dgcserver PRIVATE
@@ -46,7 +44,6 @@ install(TARGETS dgcserver
 
 add_executable(dgcsim
     sim/main.cpp
-    src/mqtt.h src/mqtt.cpp
 )
 
 target_link_libraries(dgcsim PRIVATE
