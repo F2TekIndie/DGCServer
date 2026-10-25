@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(DGCServer VERSION 0.1 LANGUAGES CXX)
 
@@ -10,6 +10,7 @@ set(THIRD_PARTY_ROOT "/home/f2tek/SwDev" CACHE PATH "Root of third-party librari
 #
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../DroneSDK/protocol"
@@ -23,12 +24,17 @@ add_subdirectory(
 
 add_executable(dgcserver
     server/main.cpp
+    server/db.h server/db.cpp
+    server/grpc.h server/grpc.cpp
+    server/mqclient.h server/mqclient.cpp
 )
 
 target_link_libraries(dgcserver PRIVATE
     Boost::system
     Threads::Threads
     DGCProto
+    DGCSources
+    SQLite3::SQLite3
 )
 
 target_include_directories(dgcserver PRIVATE
@@ -44,6 +50,7 @@ install(TARGETS dgcserver
 
 add_executable(dgcsim
     sim/main.cpp
+    sim/mqclient.h sim/mqclient.cpp
 )
 
 target_link_libraries(dgcsim PRIVATE
