@@ -16,29 +16,24 @@ add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/../DroneSDK/protocol"
     "${CMAKE_CURRENT_BINARY_DIR}/dronesdkproto"
 )
-add_subdirectory(
-    "${CMAKE_CURRENT_SOURCE_DIR}/../DroneSDK/sources"
-    "${CMAKE_CURRENT_BINARY_DIR}/dronesdksrc"
-)
-
 
 add_executable(dgcserver
     server/main.cpp
     server/db.h server/db.cpp
     server/grpc.h server/grpc.cpp
-    server/mqclient.h server/mqclient.cpp
+    sdk/mqclient.h sdk/mqclient.cpp
+    sdk/config.h
 )
 
 target_link_libraries(dgcserver PRIVATE
     Boost::system
     Threads::Threads
     DGCProto
-    DGCSources
     SQLite3::SQLite3
 )
 
 target_include_directories(dgcserver PRIVATE
-    src
+    sdk
     server
 )
 
@@ -50,18 +45,18 @@ install(TARGETS dgcserver
 
 add_executable(dgcsim
     sim/main.cpp
-    sim/mqclient.h sim/mqclient.cpp
+    sdk/mqclient.h sdk/mqclient.cpp
+    sdk/config.h
 )
 
 target_link_libraries(dgcsim PRIVATE
     Boost::system
     Threads::Threads
     DGCProto
-    DGCSources
 )
 
 target_include_directories(dgcsim PRIVATE
-    src
+    sdk
     sim
 )
 

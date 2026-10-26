@@ -6,11 +6,10 @@
 
 
 
-mqClient::mqClient( Configuration const& config, std::shared_ptr<database> db )
+mqClient::mqClient( Configuration const& config )
     :_config( config )
     ,_ioc()
     ,_client( _ioc )
-    ,_db( db )
 {
 }
 
