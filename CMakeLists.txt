@@ -21,6 +21,7 @@ add_executable(dgcserver
     server/main.cpp
     server/db.h server/db.cpp
     server/grpc.h server/grpc.cpp
+    server/mqsubscriptions.h server/mqsubscriptions.cpp
     sdk/mqclient.h sdk/mqclient.cpp
     sdk/config.h
 )
