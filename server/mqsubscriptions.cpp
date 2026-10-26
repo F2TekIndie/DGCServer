@@ -25,5 +25,6 @@ std::vector<boost::mqtt5::subscribe_topic> dgcSubscriptions::Subscriptions() con
 }
 
 void dgcSubscriptions::HandleMessage( std::string sTopic, std::string sMessage ){
-    ;
+    // FROM BROKER TO DATABASE
+    //
 }

@@ -46,6 +46,7 @@ install(TARGETS dgcserver
 
 add_executable(dgcsim
     sim/main.cpp
+    sim/drone.h sim/drone.cpp
     sdk/mqclient.h sdk/mqclient.cpp
     sdk/config.h
 )

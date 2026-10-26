@@ -2,6 +2,7 @@
 #include <iostream>
 #include "config.h"
 #include "mqclient.h"
+#include "drone.h"
 
 
 
@@ -18,6 +19,7 @@ int main( int argc, char* argv[] ){
     mqc.connect();
     
     // SIMULATE till shutdown
+    DroneManager dm;
     {
         // Variables to fill:
         //  ID

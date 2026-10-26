@@ -37,9 +37,11 @@ void mqClient::publish( std::string const& sTopic, std::string const& sMessage )
         sTopic, sMessage,
         boost::mqtt5::retain_e::yes, boost::mqtt5::publish_props {},
         [this](boost::mqtt5::error_code ec) {
-            std::cout << ec.message() << std::endl;
-            // Disconnnect the Client.
-            _client.async_disconnect(boost::asio::detached);
+            if ( ec ){
+                std::cout << ec.message() << std::endl;
+                // Disconnnect the Client.
+                _client.async_disconnect(boost::asio::detached);
+            }
         }
     );
 }
@@ -99,4 +101,6 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
                 std::rethrow_exception(e);
         }
     );
+    //
+    // _ioc.run();  
 }
