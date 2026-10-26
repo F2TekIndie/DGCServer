@@ -11,8 +11,8 @@ namespace{
     }
 }
 
-database::database(){
-    int rc = sqlite3_open( sName.c_str(), &_db );
+database::database( Configuration const& config ){
+    int rc = sqlite3_open( config._dbName.c_str(), &_db );
     if( rc ){
         sqlite3_close( _db );
         _db = nullptr;
