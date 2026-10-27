@@ -1,4 +1,5 @@
 
+#include <chrono>
 #include <cstdlib>
 #include <string>
 #include <iostream>
@@ -24,8 +25,8 @@ int main( int argc, char* argv[] ){
         return -1;
     }
     int nCount{ std::atoi(argv[1]) };
-    if ( nCount < 0 ){
-        std::cout << "Negative count for drones!" << std::endl;
+    if ( nCount < 100 ){
+        std::cout << "Should use at least a 100 drones!" << std::endl;
         return -1;
     }
     // Read configuration
@@ -37,7 +38,7 @@ int main( int argc, char* argv[] ){
     mqc.start();
     
     // SIMULATE till shutdown
-    DroneManager dm;
+    DroneManager dm = {mqc};
     {
         // Variables to fill:
         //  ID
@@ -51,9 +52,11 @@ int main( int argc, char* argv[] ){
         //  Online
         //  State
         //  Position
+        const auto start = std::chrono::steady_clock::now();
         while( !_exitSimulator ){
             std::this_thread::sleep_for( std::chrono::seconds(1) );
-            dm.Update();
+            const auto update = std::chrono::steady_clock::now();
+            dm.Update( (update-start).count() );
         }
     }
 

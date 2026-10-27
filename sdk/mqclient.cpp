@@ -7,7 +7,9 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/mqtt5/logger.hpp>
 #include <thread>
+#include <variant>
 
 
 
@@ -20,7 +22,10 @@ namespace{
 mqClient::mqClient( Configuration const& config )
     :_config( config )
     ,_ioc()
-    ,_client( _ioc )
+    ,_client(   _ioc
+                ,std::monostate{},
+                boost::mqtt5::logger{ config._dbgLogging ? boost::mqtt5::log_level::debug : boost::mqtt5::log_level::error }
+            )
 {
 }
 

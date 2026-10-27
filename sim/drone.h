@@ -1,32 +1,49 @@
 
 #pragma once
+#include "mqclient.h"
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <random>
 
 
 
 
 //
+struct Drone{
+    uint32_t       _droneId;
+    uint32_t       _clientId;
+    std::string    _name;
+    uint32_t       _state;
+    bool           _online;
+    double         _posLang;
+    double         _posLat;
+    //
+    double      _headingRad;
+    double      _speedMps;
+};
+
 struct DroneManager{
-    DroneManager() = default;
+    DroneManager( mqClient& mqc );
     ~DroneManager() = default;
     //
     DroneManager( DroneManager const& rhs ) = delete;
     DroneManager const& operator=( DroneManager const& rhs ) = delete;
     //
     void Init( size_t nCount );    // Id, Name, Online, State, Position
-    void Update();              // Online, State, Position
-    void UpdateAttributes();    // MQTT <= Online, State, Position
-    void UpdateTimeseries();    // MQTT <= Online, State, Position
+    void Update( double dtSeconds );              // Online, State, Position
 
 private:
-    std::vector<uint32_t>       _droneIds;
-    std::vector<uint32_t>       _clientIds;
-    std::vector<std::string>    _names;
-    std::vector<uint32_t>       _state;
-    std::vector<bool>           _online;
-    std::vector<uint32_t>       _posLang;
-    std::vector<uint32_t>       _posLat;
+    void UpdateDevice( Drone const& drone );        // MQTT <= Id, Name, Online, State, Position
+    void UpdateAttributes( Drone const& drone );    // MQTT <= Online, State
+    void UpdateTimeseries( Drone const& drone );    // MQTT <= Position
+    //
+    std::vector<Drone> _drones{};
+    //
+    std::mt19937 _rng{std::random_device{}()};
+    std::bernoulli_distribution _onlineChance{0.6};
+    std::discrete_distribution<> _states{30, 30, 40 };
+    //
+    mqClient& _mqttClient;
 };
 
