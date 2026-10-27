@@ -1,6 +1,7 @@
 
 #include <iostream>
 #include <memory>
+#include <thread>
 #include "config.h"
 #include "db.h"
 #include "grpc.h"
@@ -8,8 +9,15 @@
 #include "mqsubscriptions.h"
 
 
+namespace{
+    std::atomic<bool> _exitServer = false;
+    void signalExitHandler(int nSig){
+        _exitServer = true;
+    }
+}
 
 int main( int argc, char* argv[] ){
+    ::signal( SIGINT, signalExitHandler );
     // Read configuration
     Configuration conf = { loadConfiguration("server.ini") };
     // DB Connection to store all drone messages and query for DGC
@@ -19,16 +27,24 @@ int main( int argc, char* argv[] ){
     mqClient mqc( conf );
     mqc.connect();
     mqc.subscribe( dgcs );
+    mqc.start();
     // gRPC Server to allow DGC to connect to the server
     rpcServer rpcS( conf, dbc );
-    rpcS.listen();
-    
-    // IDLE till shutdown
-    ;
-
-    // Cleanup
-    rpcS.stop();
+    bool bSuccess = rpcS.listen();
+    if ( bSuccess ){
+        rpcS.start();
+        // IDLE till shutdown
+        while( !_exitServer ){
+            std::this_thread::sleep_for( std::chrono::seconds(1) );
+        }
+        // Cleanup
+        rpcS.stop();
+    }
+    else{
+        std::cout << "Could not start gRPC Server!" << std::endl;
+    }
     mqc.disconnect();
+    mqc.stop();
 
     return 0;
 }

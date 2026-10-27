@@ -3,6 +3,8 @@
 
 #include <grpcpp/server.h>
 #include <memory>
+#include <thread>
+
 
 
 //
@@ -13,8 +15,11 @@ struct IServices;
 //
 struct rpcServer{
     explicit rpcServer( Configuration const& config, std::shared_ptr<database> db );
+    ~rpcServer();
+    
     //
-    void listen();
+    bool listen();
+    void start();
     void stop();
 
 private:
@@ -22,4 +27,6 @@ private:
     std::shared_ptr<database> _db;
     std::vector< std::shared_ptr<IServices> > _services;
     std::unique_ptr<grpc::Server> _server;
+    //
+    std::jthread tRunner;    
 };

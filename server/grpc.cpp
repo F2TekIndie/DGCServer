@@ -1,5 +1,10 @@
 
 #include "grpc.h"
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <cstddef>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server_builder.h>
@@ -123,7 +128,11 @@ rpcServer::rpcServer( Configuration const& config, std::shared_ptr<database> db 
 {
 }
 
-void rpcServer::listen(){
+rpcServer::~rpcServer(){
+    stop();
+}
+
+bool rpcServer::listen(){
     DeviceService* devService = new DeviceService();
     _services.push_back( std::shared_ptr<IServices>( devService ) );
     AttributeService* attribService = new AttributeService();
@@ -140,12 +149,23 @@ void rpcServer::listen(){
     builder.RegisterService( timeService );
     //
     _server = builder.BuildAndStart();
-    //
-    //server->Wait(); // BLOCKING
+    return (_server != nullptr);
+}
+
+void rpcServer::start(){
+    auto runner = [this](){
+        if ( _server ){
+            _server->Wait();
+        }
+    };
+    tRunner = std::jthread( runner );
 }
 
 void rpcServer::stop(){
     if ( _server ){
         _server->Shutdown();
+    }
+    if ( tRunner.joinable() ){
+        tRunner.join();
     }
 }

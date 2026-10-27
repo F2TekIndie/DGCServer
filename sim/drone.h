@@ -15,7 +15,7 @@ struct DroneManager{
     DroneManager( DroneManager const& rhs ) = delete;
     DroneManager const& operator=( DroneManager const& rhs ) = delete;
     //
-    void Init( size_t nCount, bool bCreateNew, bool bRandomValues );    // Id, Name, Online, State, Position
+    void Init( size_t nCount );    // Id, Name, Online, State, Position
     void Update();              // Online, State, Position
     void UpdateAttributes();    // MQTT <= Online, State, Position
     void UpdateTimeseries();    // MQTT <= Online, State, Position
