@@ -67,3 +67,26 @@ install(TARGETS dgcsim
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(mqtt_persistence_test
+        tests/mqtt_persistence.cpp
+        server/db.cpp
+        server/mqsubscriptions.cpp
+        sim/drone.cpp
+    )
+    target_include_directories(mqtt_persistence_test PRIVATE
+        sdk
+        server
+        sim
+    )
+    target_link_libraries(mqtt_persistence_test PRIVATE
+        DGCProto
+        SQLite3::SQLite3
+        Boost::system
+        Threads::Threads
+    )
+    add_test(NAME mqtt_persistence COMMAND mqtt_persistence_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/sql/create_schema.sql")
+endif()

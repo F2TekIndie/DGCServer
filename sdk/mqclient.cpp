@@ -46,12 +46,16 @@ void mqClient::disconnect(){
 
 void mqClient::publish( std::string const& sTopic, std::string const& sMessage ){
     boost::asio::post( _ioc, [this, sTopic, sMessage](){
-        _client.async_publish<boost::mqtt5::qos_e::at_most_once>(
+        _client.async_publish<boost::mqtt5::qos_e::exactly_once>(
             sTopic, sMessage,
             boost::mqtt5::retain_e::yes, boost::mqtt5::publish_props {},
-            [this](boost::mqtt5::error_code ec) {
+            []( boost::mqtt5::error_code ec, boost::mqtt5::reason_code reason,
+                boost::mqtt5::pubcomp_props ){
                 if ( ec ){
                     std::cout << ec.message() << std::endl;
+                }
+                else if ( reason ){
+                    std::cout << reason.message() << std::endl;
                 }
             }
         );
@@ -70,10 +74,14 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
                 topics, boost::mqtt5::subscribe_props {}, use_nothrow_awaitable
             );
             // Note: you can subscribe to multiple Topics in one mqtt_client::async_subscribe call.
-            if (ec)
+            if ( ec ){
                 std::cout << "Subscribe error occurred: " << ec.message() << std::endl;
-            else
-                std::cout << "Result of subscribe request: " << sub_codes[0].message() << std::endl;
+            }
+            else{
+                for ( auto idx{0};idx<sub_codes.size();++idx){
+                    std::cout << "Result of subscribe request: " << sub_codes[idx].message() << std::endl;
+                }
+            }
 
             co_return !ec && !sub_codes[0]; // True if the subscription was successfully established.
         };
@@ -95,10 +103,12 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
                     else
                         break;
                 }
-                else if (ec)
+                else if ( ec ){
                     break;
-
-                std::cout << "Received message from the Broker" << std::endl;
+                }
+                // SYNCED CALL TO THE DATABASE!!!
+                // PERFORMANCE IS DEPENDING ON WRITING SPEED NOW!!!
+                // RETHINK OR DECOUPLE
                 _subscriptionHandler->HandleMessage( topic, payload );
             }
 

@@ -1,6 +1,16 @@
 
 #include "drone.h"
 #include "mqtt.h"
+#include "devices.pb.h"
+#include "attributes.pb.h"
+#include "timeseries.pb.h"
+#include <chrono>
+#include <cmath>
+#include <limits>
+#include <numbers>
+#include <sstream>
+#include <locale>
+#include <stdexcept>
 #include <algorithm>
 #include <iostream>
 #include <cassert>
@@ -22,6 +32,32 @@ namespace{
         DS_STATIONARY   = 4,
         DS_TRAVELING    = 5
     };
+    //
+    dronegroundcontrol::Device MakeDevice(Drone const& drone){
+        dronegroundcontrol::Device message;
+        message.set_id(drone._droneId);
+        message.set_name(drone._name);
+        message.set_type("simulated");
+        message.mutable_client_id()->set_id(drone._clientId);
+        return message;
+    }
+    //
+    std::string CoordinateString(double value){
+        std::ostringstream stream;
+        stream.imbue(std::locale::classic());
+        stream.precision(std::numeric_limits<double>::max_digits10);
+        stream << value;
+        return stream.str();
+    }
+    //
+    template<typename Message>
+    void PublishMessage( mqClient& client, std::string const& topic, Message const& message ){
+        std::string payload;
+        if ( !message.SerializeToString(&payload) ){
+            throw std::runtime_error("Could not serialize MQTT message for " + topic);
+        }
+        client.publish(topic, payload);
+    }
     //
     void PrintDrone( Drone const& drone ){
         std::cout << "** DRONE ** " << std::endl;
@@ -88,6 +124,8 @@ void DroneManager::Init( size_t nCount ){
         _drones[ idx ]._speedMps = speed( _rng );
         //
         UpdateDevice( _drones[idx] );
+        UpdateAttributes( _drones[idx] );
+        UpdateTimeseries( _drones[idx] );
     }
 }
 
@@ -130,16 +168,36 @@ void DroneManager::Update(double dtSeconds){
 
 
 void DroneManager::UpdateDevice( Drone const& drone ){
-    std::string sMessage;
-    _mqttClient.publish( dronesdk::mqtt::EP_DEVICE, sMessage );
+    PublishMessage(_mqttClient, dronesdk::mqtt::EP_DEVICE, MakeDevice(drone));
 }
 
 void DroneManager::UpdateAttributes( Drone const& drone ){
-    std::string sMessage;
-    _mqttClient.publish( dronesdk::mqtt::EP_ATTRIBUTES, sMessage );
+    dronegroundcontrol::AttributeRequest message;
+    *message.mutable_device() = MakeDevice(drone);
+    //
+    auto* attribute = message.mutable_attrib();
+    attribute->set_name("online");
+    attribute->set_bvalue(drone._online);
+    PublishMessage(_mqttClient, dronesdk::mqtt::EP_ATTRIBUTES, message);
+    //
+    attribute->set_name("state");
+    attribute->set_ivalue(drone._state); // Replaces the previous oneof value.
+    PublishMessage(_mqttClient, dronesdk::mqtt::EP_ATTRIBUTES, message);
 }
 
 void DroneManager::UpdateTimeseries( Drone const& drone ){
-    std::string sMessage;
-    _mqttClient.publish( dronesdk::mqtt::EP_ATTRIBUTES, sMessage );
+    const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>( std::chrono::system_clock::now().time_since_epoch() ).count();
+    //
+    dronegroundcontrol::TimeseriesRequest message;
+    *message.mutable_device() = MakeDevice(drone);
+    //
+    auto* sample = message.mutable_data();
+    sample->set_timestamp(std::to_string(timestamp)); // UTC Unix milliseconds.
+    sample->set_name("latitude");
+    sample->set_svalue(CoordinateString(drone._posLat));
+    PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
+    //
+    sample->set_name("longitude");
+    sample->set_svalue(CoordinateString(drone._posLang));
+    PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
 }

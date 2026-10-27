@@ -45,6 +45,9 @@ Unique constraints index users by client/username and attributes by device/name.
 Additional indexes cover devices by client and timeseries by device/time or
 by device/name/time. Parent deletion does not cascade.
 
-The current server connection enables foreign keys, but does not yet implement
-inserts, queries, or conversion from protocol values. There are no seed users,
-clients, or devices in the initial schema.
+The server connection enables foreign keys and stores MQTT messages using bound
+parameters and one transaction per message. Clients/devices are automatically
+created from identity fields, even when telemetry arrives before registration.
+Attributes are upserted; timeseries samples are appended. Invalid messages roll
+back their identity and value writes together. There are no seed users, clients,
+or devices. Application read queries and gRPC persistence are not implemented.

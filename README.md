@@ -1,20 +1,21 @@
 # DGCServer
 
 **Status: proof-of-concept prototype.** Networking lifecycle and database
-scaffolding exist, but request processing, persistence, and simulation remain
-incomplete. This is not production-ready.
+scaffolding and randomized drone simulation exist, but request processing and
+persistence remain incomplete. This is not production-ready.
 
 ## Current behavior
 
 | Executable | Current behavior |
 | --- | --- |
 | `dgcserver` | Opens SQLite, starts MQTT subscription processing and a gRPC server, then waits for Ctrl+C (SIGINT). |
-| `dgcsim` | Starts an MQTT client, creates an empty drone manager, then shuts down; no simulation loop or publishing is implemented. |
+| `dgcsim` | Simulates drones, publishes Protobuf identity/attributes/position samples over MQTT, and runs until Ctrl+C. |
 
 The gRPC service methods currently return OK with default/empty responses and
-perform no database operations. MQTT messages reach `HandleMessage`, whose body
-is still empty. The database wrapper opens a connection and enables foreign
-keys, but does not create tables or expose application queries.
+perform no database operations. MQTT device, attribute, and timeseries payloads
+are deserialized and stored in SQLite. Unknown clients/devices are created on
+first contact; registration is not required. The database wrapper enables foreign
+keys, but does not create tables or expose application read queries.
 
 ## Repository layout
 
@@ -70,7 +71,7 @@ sqlite3 -bail dgc.sqlite < sql/create_schema.sql
 Press Ctrl+C to request server shutdown. Run the simulator separately:
 
 ```sh
-./build/local/dgcsim
+./build/local/dgcsim 100
 ```
 
 See [database documentation](sql/README.md) for relationships and value formats.
@@ -95,8 +96,14 @@ The server subscribes to these exact MQTT topics, including the leading slash:
 - `/device/attribute`
 - `/device/timeseries`
 
-No wildcard matching is configured. Payload encoding and database mapping are
-not implemented. Publish requests currently use QoS 0 with RETAIN enabled;
+No wildcard matching is configured. Simulator payloads are binary Protobuf:
+`Device` on `/device`, `AttributeRequest` on `/device/attribute` (named `online`
+and `state`), and `TimeseriesRequest` on `/device/timeseries` (named `latitude`
+and `longitude`). Every request includes device/client identity. Coordinates
+use string values with round-trip double precision, and timestamp strings are
+UTC Unix milliseconds. Both coordinate samples share one timestamp. Initial
+values are sent for every drone; later position samples are sent for traveling
+drones. The simulator currently requires at least 100 drones. Server handlers deserialize these messages and store them transactionally. Publish requests currently use QoS 2 (exactly once) with RETAIN enabled;
 subscriptions request QoS 2, subject to broker approval and publisher QoS.
 
 ## Implementation and limitations
@@ -105,15 +112,39 @@ subscriptions request QoS 2, subject to broker approval and publisher QoS.
   disconnect, and subscription setup are posted to that context. Connect is
   currently called before starting the worker.
 - `sdk/config.h`, `sdk/mqtt.h`: default settings and topic constants.
-- `server/db.*`: SQLite connection ownership and foreign-key setup.
+- `server/db.*`: SQLite connection ownership, foreign keys, and transactional writes.
 - `server/grpc.*`: service stubs, listener, and waiting worker.
-- `server/mqsubscriptions.*`: subscriptions and placeholder message handler.
-- `sim/drone.*`: drone state containers and empty simulation methods.
+- `server/mqsubscriptions.*`: topic routing, Protobuf decoding, and persistence.
+- `sim/drone.*`: randomized state/movement updates and Protobuf publishing.
 - `sql/create_schema.sql`: initial database schema.
 
 Shutdown currently posts MQTT disconnect and immediately stops its context, so
 protocol-level disconnect completion is not guaranteed. Subscription handling
 checks only the first result, and exceptions escaping MQTT handlers can terminate
 the worker/process. gRPC startup failure is reported, but the entry point still
-returns zero. Configuration parsing, authentication, RPC/database behavior, and
+returns zero. Configuration parsing, authentication, RPC database operations, and live-broker
 end-to-end tests remain future work.
+
+## MQTT persistence
+
+Run `sql/create_schema.sql` before starting the server. Each device/telemetry
+message upserts its client and device, generating `Client_<id>` / `Device_<id>`
+names if omitted. Nonempty identity metadata updates existing records; IDs must
+be nonzero. Device IDs are global in the current schema. Attributes replace the
+current `(device_id, name)` value; timeseries messages append samples, including
+repeated timestamps. Coordinates in position attributes are converted to numeric
+degrees; latitude/longitude timeseries values remain strings as sent.
+
+Each message is an atomic transaction with bound SQL parameters. Invalid
+Protobuf, missing values, invalid coordinates/timestamps, or database errors are
+logged and the message is rejected without stopping reception. `/status` has no
+payload contract yet and is logged as unsupported. QoS retries/retained delivery
+can append duplicate historical samples; no deduplication is implemented.
+
+Run the payload-to-database integration test (no broker required):
+
+```sh
+cmake -S . -B build/local -DBUILD_TESTING=ON
+cmake --build build/local --parallel
+ctest --test-dir build/local --output-on-failure
+```

@@ -52,11 +52,14 @@ int main( int argc, char* argv[] ){
         //  Online
         //  State
         //  Position
-        const auto start = std::chrono::steady_clock::now();
+        auto previousUpdate = std::chrono::steady_clock::now();
         while( !_exitSimulator ){
-            std::this_thread::sleep_for( std::chrono::seconds(1) );
+            std::this_thread::sleep_for( std::chrono::seconds(10) );
             const auto update = std::chrono::steady_clock::now();
-            dm.Update( (update-start).count() );
+            const double dtSeconds =
+                std::chrono::duration<double>(update - previousUpdate).count();
+            previousUpdate = update;
+            dm.Update(dtSeconds);
         }
     }
 

@@ -21,5 +21,9 @@ struct dgcSubscriptions : public ISubsciptionHandler{
     void HandleMessage( std::string sTopic, std::string sMessage );
 
 private:
+    void HandleDevice( std::string const& sMessage );
+    void HandleAttributes( std::string const& sMessage );
+    void HandleTimeseries( std::string const& sMessage );
+    //
     std::shared_ptr<database> _dbc;
 };
