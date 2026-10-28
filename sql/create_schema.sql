@@ -44,7 +44,7 @@ CREATE TABLE attributes (
 );
 
 -- Historical samples; timestamp_ms is UTC Unix time in milliseconds.
--- Multiple samples with the same device, name and timestamp are permitted.
+-- A position pair is unique per device/timestamp; other metrics may repeat.
 CREATE TABLE timeseries (
     id INTEGER PRIMARY KEY,
     device_id INTEGER NOT NULL REFERENCES device(id) ON DELETE RESTRICT,
@@ -65,5 +65,9 @@ CREATE TABLE timeseries (
 CREATE INDEX idx_device_client ON device(client_id);
 CREATE INDEX idx_timeseries_device_time ON timeseries(device_id, timestamp_ms);
 CREATE INDEX idx_timeseries_device_name_time ON timeseries(device_id, name, timestamp_ms);
+
+-- Coordinate rows together represent one position pair per device/timestamp.
+CREATE UNIQUE INDEX idx_timeseries_position_unique ON timeseries(device_id, name, timestamp_ms)
+    WHERE name IN ('latitude', 'longitude');
 
 COMMIT;

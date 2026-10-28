@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 #include <string>
 
@@ -23,9 +24,11 @@ struct Drone{
     std::string    _name;
     uint32_t       _state;
     bool           _online;
-    // Pending history; StoreDrone clears these samples only after commit.
+    // Retained history; samples are append-only.
     std::vector< TimeseriesPos > _position;
     // Non persistet members
     double      _headingRad;
     double      _speedMps;
+    // Persistence progress; history samples are append-only.
+    std::size_t _persistedPositions{0};
 };

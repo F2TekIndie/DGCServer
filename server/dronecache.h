@@ -3,6 +3,8 @@
 #include <memory>
 #include <thread>
 #include <map>
+#include <atomic>
+#include <mutex>
 #include "drone.h"
 
 
@@ -21,11 +23,13 @@ struct Drone;
 struct CacheData{
     bool _bDirty{false};
     Drone _Drone{};
+    uint64_t _version{0};
 };
 
 //
 struct DroneCache{
     explicit DroneCache( std::shared_ptr<database> dbc );
+    ~DroneCache();
 
     //
     void StoreDevice( dronegroundcontrol::Device const& device );
@@ -35,6 +39,8 @@ struct DroneCache{
     bool Exit();
 
 private:
+    void Synchronize();
+    std::mutex _mutex;
     std::shared_ptr<database>       _db{nullptr};
     std::map< uint32_t, CacheData > _droneCache{};
     //

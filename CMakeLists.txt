@@ -74,6 +74,7 @@ if(BUILD_TESTING)
     add_executable(mqtt_persistence_test
         tests/mqtt_persistence.cpp
         server/db.cpp
+        server/dronecache.cpp
         server/mqsubscriptions.cpp
         sim/dronemanager.cpp
     )

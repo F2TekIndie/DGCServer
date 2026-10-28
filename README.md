@@ -13,8 +13,8 @@ desktop telemetry integration remain incomplete. This is not production-ready.
 
 The gRPC service methods currently return OK with default/empty responses and
 perform no database operations. MQTT device, attribute, and timeseries payloads
-are deserialized and stored in SQLite. Unknown clients/devices are created on
-first contact; registration is not required. The database wrapper enables foreign
+are deserialized into an in-memory drone cache and synchronized to SQLite by a
+worker. Unknown drones are accepted on first contact; registration is not required. The database wrapper enables foreign
 keys, but does not create tables or expose application read queries.
 
 ## Repository layout
@@ -107,11 +107,13 @@ No wildcard matching is configured. Simulator payloads are binary Protobuf:
 `Device` on `/device`, `AttributeRequest.attributes` on `/device/attribute`
 (containing `online` and `state`), and `TimeseriesRequest.timeseries` on
 `/device/timeseries` (containing `latitude` and `longitude`). Each group is one
-MQTT publish per drone, rather than one publish per value. Every request includes device/client identity. Coordinates
+MQTT publish per drone, rather than one publish per value. Every request
+includes device/client identity. Coordinates
 use string values with round-trip double precision, and timestamp strings are
 UTC Unix milliseconds. Both coordinate samples share one timestamp. Initial
 values are sent for every drone; later position samples are sent for traveling
-drones. Server handlers deserialize these messages and store them transactionally.
+drones. Server handlers validate these messages and update the cache; the worker
+persists each dirty drone snapshot transactionally.
 
 Publishing and all four subscriptions use QoS 2 (`exactly_once`). The publish
 completion handler receives an error code, broker reason code, and PUBCOMP
@@ -132,9 +134,12 @@ acknowledgment that the database write succeeded.
 - `sdk/config.h`, `sdk/mqtt.h`: default settings and topic constants.
 - `server/db.*`: SQLite connection ownership, foreign keys, and transactional writes.
 - `server/grpc.*`: service stubs, listener, and waiting worker.
-- `server/mqsubscriptions.*`: topic routing, Protobuf decoding, and persistence.
-- `sim/drone.*`: randomized state/movement updates and Protobuf publishing.
+- `server/mqsubscriptions.*`: topic routing and Protobuf decoding into the cache.
+- `server/dronecache.*`: cache keyed by drone ID and background synchronization.
+- `sdk/drone.h`: shared drone state, retained positions, and persistence progress.
+- `sim/dronemanager.*`: randomized state/movement updates and Protobuf publishing.
 - `sql/create_schema.sql`: initial database schema.
+- `sql/002_unique_positions.sql`: migration for position uniqueness in existing databases.
 
 Shutdown currently posts MQTT disconnect and immediately stops its context, so
 protocol-level disconnect completion is not guaranteed. Subscription handling
@@ -145,24 +150,49 @@ and live-broker end-to-end tests remain future work.
 
 ## MQTT persistence
 
-Run `sql/create_schema.sql` before starting the server. Each device/telemetry
-message upserts its client and device, generating `Client_<id>` / `Device_<id>`
-names if omitted. Nonempty identity metadata updates existing records; IDs must
-be nonzero. Device IDs are global in the current schema. Attributes replace the
-current `(device_id, name)` value; timeseries messages append samples, including
-repeated timestamps. Coordinates in position attributes are converted to numeric
-degrees; latitude/longitude timeseries values remain strings as sent.
+Initialize the schema before starting the server. Existing databases also need
+[the position-key migration](sql/README.md#existing-databases-unique-positions).
 
-Each message/batch is an atomic transaction with bound SQL parameters. A bad
-item rolls back the entire batch. Legacy single-value `attrib` and `data`
-payloads remain accepted; requests must contain either a single value or a
-nonempty batch, never both. Rebuild simulator and server together after the
-protocol update. Invalid
-Protobuf, missing values, invalid coordinates/timestamps, or database errors are
-logged and the message is rejected without stopping reception. `/status` has no
-payload contract yet and is logged as unsupported. Replayed retained messages,
-application resends, or separate publish operations can append duplicate
-historical samples; no database deduplication is implemented.
+The receive handler updates `DroneCache`, keyed by drone ID. It accepts metadata,
+`online` boolean and `state` uint32 attributes, and coordinate history. The
+`position` attribute is also supported; it receives a server wall-clock timestamp.
+Other attribute/sample names and wrong value types are rejected. Each batch is
+validated before changing its cache entry. `/status` remains unsupported.
+
+Timeseries batches must contain both latitude and longitude for each timestamp
+in the same message. There is no pending-coordinate storage across messages.
+Legacy single attributes are supported, but a lone latitude or longitude sample
+is rejected. Requests must use either the single-value or batch field, not both.
+
+`Drone` owns all drone data. Positions use
+`std::chrono::sys_time<std::chrono::milliseconds>` and remain in `_position`
+after storage. Drone ID plus timestamp uniquely identifies a position pair:
+replays do not append duplicates, and changed coordinates update that pair.
+`_persistedPositions` tracks the stored prefix; correcting an older position
+rewinds this progress so it is written again.
+
+Every 100 ms, the worker copies dirty snapshots while holding the cache mutex,
+then releases it before database I/O. Version counters keep newer updates dirty
+when they arrive during a write. Failed writes leave history and progress intact
+for retry. Cache destruction joins the worker and attempts a final flush. A
+persistent database error is logged; the in-memory cache is not crash-durable.
+
+The sole database write API is `StoreDrone(Drone&)`. In one transaction it
+upserts client/device identity, current online/state/position attributes, and
+new or corrected historical coordinates using bound parameters. Missing names
+become `Client_<id>` / `Device_<id>`; device IDs are global and both IDs must be
+nonzero. Device type and client name are not represented in `Drone`, so existing
+database metadata for those fields is preserved.
+
+Latitude/longitude history remains string-valued in SQLite, while the current
+position attribute uses numeric degrees. Both coordinate rows are upserted
+atomically, with a unique index on device/name/timestamp for those two metrics.
+Database uniqueness prevents duplicate position rows across cache restarts;
+MQTT QoS 2 itself is not a database commit acknowledgment.
+
+History is currently retained without an eviction limit. Monitoring cache size,
+flush latency, and dirty-drone count is not implemented yet. Rebuild simulator
+and server together after protocol changes.
 
 Run the payload-to-database integration test (no broker required):
 
@@ -179,8 +209,8 @@ results. Set `_dbgLogging` to false in `sdk/config.h` to select error-level
 logging. `async_run` still uses `detached`, so its final completion is not
 reported through an application callback.
 
-SQLite writes run synchronously in the MQTT receive handler. There is no
-application queue-depth counter or throughput/latency reporting yet. Broker
+SQLite writes run on the cache worker, outside the MQTT receive handler. There
+is no dirty-cache counter or throughput/latency reporting yet. Broker
 statistics alone do not measure how many messages are waiting for database
 storage.
 

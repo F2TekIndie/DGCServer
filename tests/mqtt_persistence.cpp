@@ -61,18 +61,28 @@ namespace{
     };
 }
 
-// Test doubles for the network and cache boundaries. The cache implementation
-// is currently a stub; this checks routing, not cache synchronization.
+// Replace only the network boundary; exercise the real cache and its worker.
 mqClient::mqClient( Configuration const& config ) :_config(config), _client(_ioc){}
 mqClient::~mqClient(){}
 void mqClient::publish( std::string const& topic, std::string const& payload ){
     ++publishCount;
+    if ( topic == dronesdk::mqtt::EP_DEVICE ){
+        dronegroundcontrol::Device value;
+        Require( value.ParseFromString(payload), "Device payload" );
+        devices.push_back(value);
+    }
+    else if ( topic == dronesdk::mqtt::EP_ATTRIBUTES ){
+        dronegroundcontrol::AttributeRequest value;
+        Require( value.ParseFromString(payload), "Attribute payload" );
+        attributes.push_back(value);
+    }
+    else if ( topic == dronesdk::mqtt::EP_TIMESERIES ){
+        dronegroundcontrol::TimeseriesRequest value;
+        Require( value.ParseFromString(payload), "Timeseries payload" );
+        timeseries.push_back(value);
+    }
     receiver->HandleMessage( topic, payload );
 }
-DroneCache::DroneCache( std::shared_ptr<database> db ) :_db(db){}
-void DroneCache::StoreDevice( dronegroundcontrol::Device const& value ){ devices.push_back(value); }
-void DroneCache::StoreAttribute( dronegroundcontrol::AttributeRequest const& value ){ attributes.push_back(value); }
-void DroneCache::StoreTimeseries( dronegroundcontrol::TimeseriesRequest const& value ){ timeseries.push_back(value); }
 
 int main( int argc, char** argv ){
     try{
@@ -86,8 +96,8 @@ int main( int argc, char** argv ){
         config._dbName = file.path.string();
         auto db = std::make_shared<database>( config );
         auto cache = std::make_shared<DroneCache>( db );
-        dgcSubscriptions handler( cache );
-        receiver = &handler;
+        auto handler = std::make_unique<dgcSubscriptions>( cache );
+        receiver = handler.get();
 
         mqClient mqtt( config );
         DroneManager simulator( mqtt );
@@ -110,10 +120,44 @@ int main( int argc, char** argv ){
         Require( longitude.name() == "longitude" && longitude.has_svalue(), "Longitude sample" );
         Require( latitude.timestamp() == longitude.timestamp() && std::stoll(latitude.timestamp()) > 0, "Shared timestamp" );
         for (auto const* topic : {&dronesdk::mqtt::EP_DEVICE, &dronesdk::mqtt::EP_ATTRIBUTES, &dronesdk::mqtt::EP_TIMESERIES}){
-            handler.HandleMessage( *topic, std::string(1, '\xff') );
+            handler->HandleMessage( *topic, std::string(1, '\xff') );
         }
-        handler.HandleMessage( "/unknown", "ignored" );
+        handler->HandleMessage( "/unknown", "ignored" );
         Require( devices.size() == 1 && attributes.size() == 1 && timeseries.size() == 1, "Invalid payloads must not reach cache" );
+
+        // Incomplete coordinate messages are rejected, not stored as pending.
+        auto pair = timeseries[0];
+        pair.mutable_device()->set_id(2);
+        auto incomplete = pair;
+        incomplete.mutable_timeseries()->mutable_timeseries()->RemoveLast();
+        bool incompleteRejected = false;
+        try{ cache->StoreTimeseries(incomplete); }catch (std::invalid_argument const&){ incompleteRejected = true; }
+        Require(incompleteRejected, "Reject incomplete coordinate pair");
+        for (auto& sample : *pair.mutable_timeseries()->mutable_timeseries()){
+            sample.set_timestamp("1700000000123");
+            sample.set_svalue("0");
+        }
+        cache->StoreTimeseries(pair);
+        cache->StoreTimeseries(pair); // Replay must not duplicate the pair.
+        pair.mutable_timeseries()->mutable_timeseries(0)->set_svalue("1");
+        cache->StoreTimeseries(pair); // Same key updates coordinates.
+        auto invalid = attributes[0];
+        invalid.mutable_device()->set_id(3);
+        invalid.mutable_attributes()->mutable_timeseries(1)->set_svalue("wrong type");
+        bool invalidRejected = false;
+        try{ cache->StoreAttribute(invalid); }catch (std::invalid_argument const&){ invalidRejected = true; }
+        Require(invalidRejected, "Reject invalid attribute batch");
+        // Destruction joins the worker and completes the final flush.
+        receiver = nullptr;
+        handler.reset();
+        cache.reset();
+        Require(check.Scalar("SELECT count(*) FROM device") == 2, "Cache accepts unknown drones keyed by ID");
+        Require(check.Scalar("SELECT count(*) FROM attributes WHERE device_id=1") == 3, "Persist cached current state");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=1") == 2, "Persist simulator position pair once");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=2 AND timestamp_ms=1700000000123") == 2, "Store coordinate batch at same timestamp");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=2 AND name='latitude' AND string_value='1'") == 1, "Correct existing coordinate pair");
+        Require(check.Scalar("SELECT count(*) FROM device WHERE id=3") == 0, "Bad batch cannot create partial drone");
+        check.Execute("DELETE FROM timeseries; DELETE FROM attributes; DELETE FROM device; DELETE FROM client;");
 
         // Verify the new snapshot persistence API independently of the cache.
         Drone drone{};
@@ -139,10 +183,16 @@ int main( int argc, char** argv ){
         Require( check.Scalar("SELECT latitude FROM attributes WHERE name='position'") == 59, "Update position" );
         Require( check.Scalar("SELECT count(*) FROM attributes") == 3, "Upsert must not duplicate attributes" );
         Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Persist both coordinate pairs" );
-        Require( drone._position.empty(), "Consume history after commit" );
+        Require( drone._position.size() == 2 && drone._persistedPositions == 2, "Retain committed history" );
         db->StoreDrone(drone);
-        Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Empty history must not duplicate samples" );
+        Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Repeated snapshot must not duplicate history" );
         Require( check.Scalar(("SELECT count(*) FROM timeseries WHERE timestamp_ms=" + std::to_string(stamp.time_since_epoch().count())).c_str()) == 2, "Exact timestamp" );
+
+        auto replay = drone;
+        replay._persistedPositions = 0;
+        replay._position[0]._posLat = 57;
+        db->StoreDrone(replay);
+        Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Database key deduplicates replay");
 
         position._posLat = std::numeric_limits<double>::quiet_NaN();
         drone._position.push_back(position);
@@ -155,7 +205,7 @@ int main( int argc, char** argv ){
         rejected = false;
         try{ db->StoreDrone(drone); }catch (std::runtime_error const&){ rejected = true; }
         Require( rejected, "Propagate database failure" );
-        Require( drone._position.size() == 1, "Keep history after rollback" );
+        Require( drone._position.size() == 3 && drone._persistedPositions == 2, "Keep history and progress after rollback" );
         Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Rollback history" );
         Require( check.Scalar("SELECT count(*) FROM device WHERE name='Drone_1'") == 1, "Rollback identity changes" );
         Require( check.Scalar("SELECT latitude FROM attributes WHERE name='position'") == 59, "Rollback snapshot changes" );

@@ -54,7 +54,7 @@ int main( int argc, char* argv[] ){
         //  Position
         auto previousUpdate = std::chrono::steady_clock::now();
         while( !_exitSimulator ){
-            std::this_thread::sleep_for( std::chrono::seconds(10) );
+            std::this_thread::sleep_for( std::chrono::seconds(2) );
             const auto update = std::chrono::steady_clock::now();
             const double dtSeconds =
                 std::chrono::duration<double>(update - previousUpdate).count();

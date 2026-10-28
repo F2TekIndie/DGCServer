@@ -117,6 +117,9 @@ database::~database(){
 
 //
 void database::StoreDrone( Drone& drone ){
+    if ( drone._persistedPositions > drone._position.size() ){
+        throw std::invalid_argument( "Persisted position count exceeds history size" );
+    }
     if ( !drone._droneId || !drone._clientId ){
         throw std::invalid_argument( "Device and client IDs must be nonzero" );
     }
@@ -183,18 +186,21 @@ void database::StoreDrone( Drone& drone ){
         text.precision( std::numeric_limits<double>::max_digits10 );
         text << coordinate;
         Statement sample( _db,
-            "INSERT INTO timeseries(device_id,name,timestamp_ms,value_type,string_value) VALUES(?,?,?,'string',?)" );
+            "INSERT INTO timeseries(device_id,name,timestamp_ms,value_type,string_value) VALUES(?,?,?,'string',?) "
+            "ON CONFLICT(device_id,name,timestamp_ms) WHERE name IN ('latitude','longitude') DO UPDATE SET "
+            "value_type=excluded.value_type,string_value=excluded.string_value,bool_value=NULL,uint32_value=NULL" );
         sample.Integer( 1, drone._droneId );
         sample.Text( 2, name );
         sample.Integer( 3, position._timestamp.time_since_epoch().count() );
         sample.Text( 4, text.str() );
         sample.Execute();
     };
-    for ( auto const& position : drone._position ){
+    for ( auto idx = drone._persistedPositions; idx < drone._position.size(); ++idx ){
+        auto const& position = drone._position[idx];
         storeSample( position, "latitude", position._posLat );
         storeSample( position, "longitude", position._posLang );
     }
     //
     transaction.Commit();
-    drone._position.clear();
+    drone._persistedPositions = drone._position.size();
 }
