@@ -5,6 +5,7 @@
 #include "drone.h"
 #include <string>
 #include <mutex>
+#include <utility>
 
 
 
@@ -23,7 +24,8 @@ struct database{
     const database& operator=(const database& rhs) = delete;
 
     //
-    void StoreDrone( Drone& drone );
+    void StoreDrone( Drone const& drone, DroneTimeSeries& timeseries );
+    std::vector<std::pair<Drone, DroneTimeSeries>> LoadDrones();
     
 private:
     sqlite3* _db={nullptr};

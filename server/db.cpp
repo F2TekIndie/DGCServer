@@ -10,6 +10,8 @@
 #include <limits>
 #include <locale>
 #include <sstream>
+#include <charconv>
+#include <map>
 
 
 
@@ -47,6 +49,34 @@ namespace{
             }
         }
         //
+        bool Read(){
+            const int result = sqlite3_step( _stmt.get() );
+            if ( result == SQLITE_ROW ){
+                return true;
+            }
+            if ( result != SQLITE_DONE ){
+                Fail();
+            }
+            return false;
+        }
+        //
+        sqlite3_int64 ColumnInteger( int index ){
+            return sqlite3_column_int64( _stmt.get(), index );
+        }
+        //
+        std::string ColumnText( int index ){
+            auto text = sqlite3_column_text( _stmt.get(), index );
+            return text ? std::string( reinterpret_cast<char const*>(text), sqlite3_column_bytes(_stmt.get(), index) ) : std::string{};
+        }
+        //
+        double ColumnReal( int index ){
+            return sqlite3_column_double( _stmt.get(), index );
+        }
+        //
+        bool IsNull( int index ){
+            return sqlite3_column_type( _stmt.get(), index ) == SQLITE_NULL;
+        }
+        //
         void Execute(){
             if ( sqlite3_step( _stmt.get() ) != SQLITE_DONE ){
                 Fail();
@@ -64,10 +94,10 @@ namespace{
     //
     class Transaction{
     public:
-        explicit Transaction( sqlite3* db )
+        explicit Transaction( sqlite3* db, char const* begin = "BEGIN IMMEDIATE" )
             :_db( db )
         {
-            Execute( "BEGIN IMMEDIATE" );
+            Execute( begin );
         }
         //
         ~Transaction(){
@@ -116,14 +146,21 @@ database::~database(){
 }
 
 //
-void database::StoreDrone( Drone& drone ){
-    if ( drone._persistedPositions > drone._position.size() ){
+void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
+    if ( drone._droneId != timeseries._droneId || drone._clientId != timeseries._clientId ){
+        throw std::invalid_argument( "Drone and timeseries identity mismatch" );
+    }
+    if ( !std::isfinite( drone._position._posLat ) || std::abs( drone._position._posLat ) > 90
+        || !std::isfinite( drone._position._posLang ) || std::abs( drone._position._posLang ) > 180 ){
+        throw std::invalid_argument( "Invalid current position coordinate" );
+    }
+    if ( timeseries._persistedPositions > timeseries._position.size() ){
         throw std::invalid_argument( "Persisted position count exceeds history size" );
     }
     if ( !drone._droneId || !drone._clientId ){
         throw std::invalid_argument( "Device and client IDs must be nonzero" );
     }
-    for ( auto const& position : drone._position ){
+    for ( auto const& position : timeseries._position ){
         if ( !std::isfinite( position._posLat ) || std::abs( position._posLat ) > 90
             || !std::isfinite( position._posLang ) || std::abs( position._posLang ) > 180 ){
             throw std::invalid_argument( "Invalid position coordinate" );
@@ -139,20 +176,17 @@ void database::StoreDrone( Drone& drone ){
     client.Text( 2, "Client_" + std::to_string( drone._clientId ) );
     client.Execute();
     //
-    Statement device( _db, "INSERT INTO device(id,client_id,name,type) VALUES(?,?,?,'') "
-                          "ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id, "
+    Statement device( _db, "INSERT INTO device(id,client_id,name,type,position_timestamp_ms) VALUES(?,?,?,'',?) "
+                          "ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,position_timestamp_ms=excluded.position_timestamp_ms, "
                           "name=CASE WHEN ?<>'' THEN excluded.name ELSE device.name END" );
     device.Integer( 1, drone._droneId );
     device.Integer( 2, drone._clientId );
     device.Text( 3, drone._name.empty() ? "Device_" + std::to_string( drone._droneId ) : drone._name );
-    device.Text( 4, drone._name );
+    device.Integer( 4, drone._position._timestamp.time_since_epoch().count() );
+    device.Text( 5, drone._name );
     device.Execute();
     // Each statement starts with NULL value columns, clearing obsolete oneof
     // columns if an attribute previously had a different type.
-    auto latest = std::max_element( drone._position.begin(), drone._position.end(),
-        []( auto const& left, auto const& right ){
-            return left._timestamp < right._timestamp;
-        } );
     auto store = [&]( char const* name, char const* type ){
         Statement entry( _db,
             "INSERT INTO attributes(device_id,name,value_type,bool_value,uint32_value,latitude,longitude) "
@@ -169,16 +203,14 @@ void database::StoreDrone( Drone& drone ){
             entry.Integer( 5, drone._state );
         }
         else{
-            entry.Real( 6, latest->_posLat );
-            entry.Real( 7, latest->_posLang );
+            entry.Real( 6, drone._position._posLat );
+            entry.Real( 7, drone._position._posLang );
         }
         entry.Execute();
     };
     store( "online", "bool" );
     store( "state", "uint32" );
-    if ( latest != drone._position.end() ){
-        store( "position", "position" );
-    }
+    store( "position", "position" );
     // Preserve the existing string-based coordinate history contract.
     auto storeSample = [&]( TimeseriesPos const& position, char const* name, double coordinate ){
         std::ostringstream text;
@@ -195,12 +227,75 @@ void database::StoreDrone( Drone& drone ){
         sample.Text( 4, text.str() );
         sample.Execute();
     };
-    for ( auto idx = drone._persistedPositions; idx < drone._position.size(); ++idx ){
-        auto const& position = drone._position[idx];
+    for ( auto idx = timeseries._persistedPositions; idx < timeseries._position.size(); ++idx ){
+        auto const& position = timeseries._position[idx];
         storeSample( position, "latitude", position._posLat );
         storeSample( position, "longitude", position._posLang );
     }
     //
     transaction.Commit();
-    drone._persistedPositions = drone._position.size();
+    timeseries._persistedPositions = timeseries._position.size();
+}
+
+//
+std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones(){
+    const std::lock_guard lock( _mutex );
+    // Restore identities, attributes and history from a consistent snapshot.
+    Transaction transaction( _db, "BEGIN" );
+    std::vector<std::pair<Drone, DroneTimeSeries>> drones;
+    std::map<uint32_t, std::size_t> indexes;
+    Statement devices( _db,
+        "SELECT d.id,d.client_id,d.name,o.bool_value,s.uint32_value,p.latitude,p.longitude,d.position_timestamp_ms FROM device d "
+        "LEFT JOIN attributes o ON o.device_id=d.id AND o.name='online' AND o.value_type='bool' "
+        "LEFT JOIN attributes s ON s.device_id=d.id AND s.name='state' AND s.value_type='uint32' "
+        "LEFT JOIN attributes p ON p.device_id=d.id AND p.name='position' AND p.value_type='position' "
+        "ORDER BY d.id" );
+    while ( devices.Read() ){
+        Drone drone{};
+        drone._droneId = static_cast<uint32_t>( devices.ColumnInteger(0) );
+        drone._clientId = static_cast<uint32_t>( devices.ColumnInteger(1) );
+        drone._name = devices.ColumnText( 2 );
+        drone._online = devices.ColumnInteger( 3 ) != 0;
+        drone._state = static_cast<uint32_t>( devices.ColumnInteger(4) );
+        indexes.emplace( drone._droneId, drones.size() );
+        drone._position._posLat = devices.ColumnReal( 5 );
+        drone._position._posLang = devices.ColumnReal( 6 );
+        drone._position._timestamp = std::chrono::sys_time<std::chrono::milliseconds>{std::chrono::milliseconds{devices.ColumnInteger(7)}};
+        DroneTimeSeries history{};
+        history._droneId = drone._droneId;
+        history._clientId = drone._clientId;
+        drones.emplace_back( std::move( drone ), std::move( history ) );
+    }
+    Statement positions( _db,
+        "SELECT p.device_id,p.timestamp_ms,lat.string_value,lon.string_value "
+        "FROM (SELECT DISTINCT device_id,timestamp_ms FROM timeseries WHERE name IN ('latitude','longitude')) p "
+        "LEFT JOIN timeseries lat ON lat.device_id=p.device_id AND lat.timestamp_ms=p.timestamp_ms "
+        "AND lat.name='latitude' AND lat.value_type='string' "
+        "LEFT JOIN timeseries lon ON lon.device_id=p.device_id AND lon.timestamp_ms=p.timestamp_ms "
+        "AND lon.name='longitude' AND lon.value_type='string' ORDER BY p.device_id,p.timestamp_ms" );
+    auto coordinate = []( std::string const& text, double limit ){
+        double value{};
+        const auto result = std::from_chars( text.data(), text.data() + text.size(), value );
+        if ( result.ec != std::errc{} || result.ptr != text.data() + text.size()
+            || !std::isfinite( value ) || std::abs( value ) > limit ){
+            throw std::runtime_error( "Invalid stored position coordinate" );
+        }
+        return value;
+    };
+    while ( positions.Read() ){
+        const auto id = static_cast<uint32_t>( positions.ColumnInteger(0) );
+        const auto found = indexes.find( id );
+        if ( found == indexes.end() || positions.IsNull(2) || positions.IsNull(3) ){
+            throw std::runtime_error( "Incomplete or orphaned stored position pair" );
+        }
+        drones[found->second].second._position.push_back( {
+            std::chrono::sys_time<std::chrono::milliseconds>{std::chrono::milliseconds{positions.ColumnInteger(1)}},
+            coordinate( positions.ColumnText(3), 180 ), coordinate( positions.ColumnText(2), 90 )
+        } );
+    }
+    for ( auto& [drone, history] : drones ){
+        history._persistedPositions = history._position.size();
+    }
+    transaction.Commit();
+    return drones;
 }

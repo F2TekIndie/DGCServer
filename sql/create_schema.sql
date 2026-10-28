@@ -1,4 +1,6 @@
--- SQLite schema. Enable foreign keys on every application connection too.
+-- Complete setup for a new SQLite database; run once against an empty database.
+-- Includes current-position timestamps and unique historical position keys.
+-- Enable foreign keys on every application connection too.
 PRAGMA foreign_keys = ON;
 
 BEGIN TRANSACTION;
@@ -20,7 +22,8 @@ CREATE TABLE device (
     id INTEGER PRIMARY KEY CHECK (id BETWEEN 1 AND 4294967295),
     client_id INTEGER NOT NULL REFERENCES client(id) ON DELETE RESTRICT,
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
-    type TEXT NOT NULL DEFAULT ''
+    type TEXT NOT NULL DEFAULT '',
+    position_timestamp_ms INTEGER
 );
 
 -- One current value per named device attribute; columns mirror Attribute.oneof.

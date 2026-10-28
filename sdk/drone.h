@@ -24,11 +24,16 @@ struct Drone{
     std::string    _name;
     uint32_t       _state;
     bool           _online;
-    // Retained history; samples are append-only.
-    std::vector< TimeseriesPos > _position;
+    TimeseriesPos  _position;
     // Non persistet members
     double      _headingRad;
     double      _speedMps;
-    // Persistence progress; history samples are append-only.
+};
+
+struct DroneTimeSeries{
+    uint32_t       _droneId;
+    uint32_t       _clientId;
+    // Persistet members
+    std::vector< TimeseriesPos > _position;
     std::size_t _persistedPositions{0};
 };

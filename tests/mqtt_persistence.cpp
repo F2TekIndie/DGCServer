@@ -166,46 +166,85 @@ int main( int argc, char** argv ){
         drone._name = devices[0].name();
         drone._online = online.bvalue();
         drone._state = state.ivalue();
+        DroneTimeSeries droneHistory{};
+        droneHistory._droneId = drone._droneId;
+        droneHistory._clientId = drone._clientId;
         const auto stamp = std::chrono::sys_time<std::chrono::milliseconds>{std::chrono::milliseconds{std::stoll(latitude.timestamp())}};
         TimeseriesPos position{stamp, std::stod(longitude.svalue()), std::stod(latitude.svalue())};
-        drone._position.push_back(position);
-        db->StoreDrone( drone );
+        drone._position = position;
+        droneHistory._position.push_back(position);
+        db->StoreDrone( drone, droneHistory );
         Require( check.Scalar("SELECT count(*) FROM device WHERE id=1 AND client_id=99") == 1, "Automatic identity creation" );
         Require( check.Scalar("SELECT count(*) FROM attributes WHERE device_id=1") == 3, "Snapshot attribute count" );
         drone._online = true;
         drone._state = 5;
         position._posLat = 59;
         position._timestamp += std::chrono::milliseconds(1);
-        drone._position.push_back(position);
-        db->StoreDrone( drone );
+        drone._position = position;
+        droneHistory._position.push_back(position);
+        db->StoreDrone( drone, droneHistory );
         Require( check.Scalar("SELECT bool_value FROM attributes WHERE name='online'") == 1, "Update online" );
         Require( check.Scalar("SELECT uint32_value FROM attributes WHERE name='state'") == 5, "Update state" );
         Require( check.Scalar("SELECT latitude FROM attributes WHERE name='position'") == 59, "Update position" );
         Require( check.Scalar("SELECT count(*) FROM attributes") == 3, "Upsert must not duplicate attributes" );
         Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Persist both coordinate pairs" );
-        Require( drone._position.size() == 2 && drone._persistedPositions == 2, "Retain committed history" );
-        db->StoreDrone(drone);
+        Require( droneHistory._position.size() == 2 && droneHistory._persistedPositions == 2, "Retain committed history" );
+        db->StoreDrone(drone, droneHistory);
         Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Repeated snapshot must not duplicate history" );
         Require( check.Scalar(("SELECT count(*) FROM timeseries WHERE timestamp_ms=" + std::to_string(stamp.time_since_epoch().count())).c_str()) == 2, "Exact timestamp" );
 
-        auto replay = drone;
+        auto replay = droneHistory;
         replay._persistedPositions = 0;
         replay._position[0]._posLat = 57;
-        db->StoreDrone(replay);
+        db->StoreDrone(drone, replay);
         Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Database key deduplicates replay");
 
+        // Restart hydration must preserve values absent from incoming telemetry.
+        auto loaded = db->LoadDrones();
+        Require(loaded.size() == 1 && loaded[0].first._droneId == 1 && loaded[0].first._clientId == 99, "Restore drone identity");
+        Require(loaded[0].first._online && loaded[0].first._state == 5, "Restore online and state");
+        Require(loaded[0].first._position._posLat == 59 && loaded[0].first._position._timestamp == position._timestamp, "Restore current position independently of history");
+        Require(loaded[0].second._position.size() == 2 && loaded[0].second._persistedPositions == 2, "Restore persisted history progress");
+        Require(loaded[0].second._position[0]._timestamp == stamp && loaded[0].second._position[0]._posLat == 57, "Restore exact timestamp and corrected coordinate");
+        {
+            DroneCache restarted(db);
+            auto metadata = devices[0];
+            metadata.set_name("Restored");
+            restarted.StoreDevice(metadata);
+        }
+        Require(check.Scalar("SELECT bool_value FROM attributes WHERE name='online'") == 1, "Metadata after restart preserves online");
+        Require(check.Scalar("SELECT uint32_value FROM attributes WHERE name='state'") == 5, "Metadata after restart preserves state");
+        Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Hydrated history is not duplicated");
+        {
+            DroneCache restarted(db);
+            auto correction = timeseries[0];
+            // Correct an existing timestamp, without any online/state update.
+            for (auto& value : *correction.mutable_timeseries()->mutable_timeseries()){
+                value.set_timestamp(std::to_string(stamp.time_since_epoch().count()));
+                value.set_svalue("1");
+            }
+            restarted.StoreTimeseries(correction);
+        }
+        Require(check.Scalar("SELECT bool_value FROM attributes WHERE name='online'") == 1, "Position after restart preserves online");
+        Require(check.Scalar("SELECT uint32_value FROM attributes WHERE name='state'") == 5, "Position after restart preserves state");
+        Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Restored correction retains unique history");
+        // Keep the existing rollback expectations independent of restart tests.
+        check.Execute("UPDATE device SET name='Drone_1' WHERE id=1");
+
         position._posLat = std::numeric_limits<double>::quiet_NaN();
-        drone._position.push_back(position);
+        drone._position = position;
+        droneHistory._position.push_back(position);
         bool rejected = false;
-        try{ db->StoreDrone(drone); }catch (std::invalid_argument const&){ rejected = true; }
+        try{ db->StoreDrone(drone, droneHistory); }catch (std::invalid_argument const&){ rejected = true; }
         Require( rejected, "Reject invalid coordinates" );
-        drone._position.back()._posLat = 58;
+        droneHistory._position.back()._posLat = 58;
+        drone._position._posLat = 58;
         drone._name = "Changed";
         check.Execute("CREATE TRIGGER reject_state BEFORE UPDATE ON attributes WHEN NEW.name='state' BEGIN SELECT RAISE(ABORT,'test'); END");
         rejected = false;
-        try{ db->StoreDrone(drone); }catch (std::runtime_error const&){ rejected = true; }
+        try{ db->StoreDrone(drone, droneHistory); }catch (std::runtime_error const&){ rejected = true; }
         Require( rejected, "Propagate database failure" );
-        Require( drone._position.size() == 3 && drone._persistedPositions == 2, "Keep history and progress after rollback" );
+        Require( droneHistory._position.size() == 3 && droneHistory._persistedPositions == 2, "Keep history and progress after rollback" );
         Require( check.Scalar("SELECT count(*) FROM timeseries") == 4, "Rollback history" );
         Require( check.Scalar("SELECT count(*) FROM device WHERE name='Drone_1'") == 1, "Rollback identity changes" );
         Require( check.Scalar("SELECT latitude FROM attributes WHERE name='position'") == 59, "Rollback snapshot changes" );

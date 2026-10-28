@@ -7,7 +7,8 @@ sqlite3 -bail dgc.sqlite < sql/create_schema.sql
 ```
 
 Run this once against an empty database. The server opens the database but does
-not create or migrate tables. Existing databases require the migration below.
+not create tables automatically. `create_schema.sql` is the only setup script
+and includes all columns, constraints, and indexes required by the current code.
 
 ## Tables and relationships
 
@@ -28,7 +29,10 @@ script applies only to its own connection.
 ## Current persistence path
 
 MQTT payloads update `DroneCache`; a worker synchronizes dirty drone snapshots
-approximately every 100 ms through `StoreDrone(Drone&)`. No prior registration
+approximately every 100 ms through `StoreDrone(Drone const&, DroneTimeSeries&)`. At startup the cache loads existing device identities, online/state attributes,
+and complete position history before accepting updates. Loaded history is marked
+already persisted, so hydration does not duplicate samples. Failed reads or
+incomplete stored coordinate pairs abort cache construction. No prior registration
 is required. Missing clients/devices are created with `Client_<id>` /
 `Device_<id>` names. Nonempty drone names update existing records. Client name
 and device type are preserved on existing rows because `Drone` has no fields
@@ -46,9 +50,9 @@ operations remain unimplemented.
 
 ## Position representation and uniqueness
 
-`Drone._position` retains history after successful writes. Its timestamp type is
+`Drone` holds one current position; `DroneTimeSeries._position` retains history after successful writes. Its timestamp type is
 `std::chrono::sys_time<std::chrono::milliseconds>`, stored as signed 64-bit UTC
-Unix milliseconds. `_persistedPositions` tracks the stored prefix; corrections
+Unix milliseconds. `DroneTimeSeries._persistedPositions` tracks the stored prefix; corrections
 to an older entry cause that portion to be synchronized again.
 
 Drone ID plus timestamp uniquely identifies a latitude/longitude pair in the
@@ -75,18 +79,6 @@ Unique constraints index user client/username and attribute device/name pairs.
 Additional indexes support devices by client and timeseries by device/time or
 device/name/time, plus the coordinate uniqueness index described above.
 
-## Existing databases: unique positions
-
-Stop the server and back up the database, then run from DGCServer:
-
-```sh
-sqlite3 -bail dgc.sqlite < sql/update_001_unique_positions.sql
-```
-
-The migration retains the highest-ID row for each duplicate coordinate
-device/name/timestamp key and adds the unique partial index. Fresh databases
-already include this index. Schema scripts do not run automatically.
-
 ## Verification
 
 After building with `BUILD_TESTING=ON`, run from DGCServer:
@@ -99,3 +91,10 @@ The test uses a temporary database and the real cache worker, replacing only the
 MQTT network boundary. It checks simulator batches, routing, unknown drones,
 coordinate pairing/replay, snapshot persistence, retained history, timestamps,
 validation, rollback, and foreign keys. No broker is required.
+
+## Current-position timestamp
+
+`device.position_timestamp_ms` stores the current position's UTC Unix-millisecond
+timestamp. Its coordinates remain in the position attribute. Startup restores
+this snapshot independently of the retained `DroneTimeSeries` history.
+Historical corrections do not move the current snapshot backward in time.

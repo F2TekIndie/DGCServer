@@ -23,6 +23,7 @@ struct Drone;
 struct CacheData{
     bool _bDirty{false};
     Drone _Drone{};
+    DroneTimeSeries _TimeSeries{};
     uint64_t _version{0};
 };
 

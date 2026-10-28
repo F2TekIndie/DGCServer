@@ -64,7 +64,7 @@ namespace{
         std::cout << "  ID: " << drone._droneId << std::endl;
         std::cout << "  State: " << drone._state << std::endl;
         std::cout << "  Online: " << (drone._online?"True":"False") << std::endl;
-        std::cout << "  Pos: " << drone._position.back()._posLang << " " << drone._position.back()._posLat << std::endl;
+        std::cout << "  Pos: " << drone._position._posLang << " " << drone._position._posLat << std::endl;
     }
     //
     void CalculateNewDronePosition( Drone& drone, double dtSeconds ){
@@ -80,8 +80,8 @@ namespace{
             drone._headingRad + turnRate(_rng) * dtSeconds, 2.0 * std::numbers::pi
         );
 
-        const double latitude = drone._position.back()._posLat * radiansPerDegree;
-        const double longitude = drone._position.back()._posLang * radiansPerDegree;
+        const double latitude = drone._position._posLat * radiansPerDegree;
+        const double longitude = drone._position._posLang * radiansPerDegree;
         const double distance = drone._speedMps * dtSeconds / earthRadiusM;
 
         // Move along the Earth's surface; heading zero means north.
@@ -99,9 +99,9 @@ namespace{
                 std::sin(latitude) * std::sin(nextLatitude)
         );
 
-        drone._position.back()._timestamp = std::chrono::time_point_cast<std::chrono::milliseconds>( std::chrono::system_clock::now() );
-        drone._position.back()._posLat = nextLatitude / radiansPerDegree;
-        drone._position.back()._posLang = std::remainder( nextLongitude / radiansPerDegree, 360.0 );
+        drone._position._timestamp = std::chrono::time_point_cast<std::chrono::milliseconds>( std::chrono::system_clock::now() );
+        drone._position._posLat = nextLatitude / radiansPerDegree;
+        drone._position._posLang = std::remainder( nextLongitude / radiansPerDegree, 360.0 );
     }
 }
 
@@ -113,7 +113,7 @@ DroneManager::DroneManager( mqClient& mqc )
 void DroneManager::Init( size_t nCount ){
     assert( nCount > 0);
     // Resize
-    _drones.resize( nCount, {0, SimulationCliendId, "Drone_", DS_INIT, false, {{std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}}, 0.0, 5.0 } );
+    _drones.resize( nCount, {0, SimulationCliendId, "Drone_", DS_INIT, false, {std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}, 0.0, 5.0 } );
     // Init
     std::uniform_real_distribution<double> heading{ 0.0, 2.0*std::numbers::pi };
     std::uniform_real_distribution<double> speed{ 2.0, 12.0 };
@@ -188,7 +188,7 @@ void DroneManager::UpdateAttributes( Drone const& drone ){
 }
 
 void DroneManager::UpdateTimeseries( Drone const& drone ){
-    const auto timestamp = drone._position.back()._timestamp.time_since_epoch().count();
+    const auto timestamp = drone._position._timestamp.time_since_epoch().count();
     //
     dronegroundcontrol::TimeseriesRequest message;
     *message.mutable_device() = MakeDevice(drone);
@@ -197,11 +197,11 @@ void DroneManager::UpdateTimeseries( Drone const& drone ){
     auto* sample = timeseries->add_timeseries();
     sample->set_timestamp(std::to_string(timestamp)); // UTC Unix milliseconds.
     sample->set_name("latitude");
-    sample->set_svalue(CoordinateString(drone._position.back()._posLat));
+    sample->set_svalue(CoordinateString(drone._position._posLat));
     //
     sample = timeseries->add_timeseries();
     sample->set_timestamp(std::to_string(timestamp));
     sample->set_name("longitude");
-    sample->set_svalue(CoordinateString(drone._position.back()._posLang));
+    sample->set_svalue(CoordinateString(drone._position._posLang));
     PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
 }

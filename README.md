@@ -138,8 +138,8 @@ acknowledgment that the database write succeeded.
 - `server/dronecache.*`: cache keyed by drone ID and background synchronization.
 - `sdk/drone.h`: shared drone state, retained positions, and persistence progress.
 - `sim/dronemanager.*`: randomized state/movement updates and Protobuf publishing.
-- `sql/create_schema.sql`: initial database schema.
-- `sql/002_unique_positions.sql`: migration for position uniqueness in existing databases.
+- `sql/create_schema.sql`: complete new-database setup, including position
+  uniqueness and current-position timestamps.
 
 Shutdown currently posts MQTT disconnect and immediately stops its context, so
 protocol-level disconnect completion is not guaranteed. Subscription handling
@@ -150,8 +150,15 @@ and live-broker end-to-end tests remain future work.
 
 ## MQTT persistence
 
-Initialize the schema before starting the server. Existing databases also need
-[the position-key migration](sql/README.md#existing-databases-unique-positions).
+Initialize a new database with `sql/create_schema.sql` before starting the
+server. This single script includes all required tables, columns, and indexes;
+see the [database README](sql/README.md).
+
+Before starting its worker or accepting MQTT updates, `DroneCache` loads all
+stored drones, online/state attributes, and position history from one consistent
+database snapshot. Restored entries start clean with history marked persisted.
+Read failures abort startup; metadata-only or position-only updates then preserve
+the saved online/state values.
 
 The receive handler updates `DroneCache`, keyed by drone ID. It accepts metadata,
 `online` boolean and `state` uint32 attributes, and coordinate history. The
@@ -164,11 +171,12 @@ in the same message. There is no pending-coordinate storage across messages.
 Legacy single attributes are supported, but a lone latitude or longitude sample
 is rejected. Requests must use either the single-value or batch field, not both.
 
-`Drone` owns all drone data. Positions use
-`std::chrono::sys_time<std::chrono::milliseconds>` and remain in `_position`
+`Drone` holds current attributes and a single `_position`. `DroneTimeSeries`
+holds retained position history separately. Positions use
+`std::chrono::sys_time<std::chrono::milliseconds>` and remain in `DroneTimeSeries._position`
 after storage. Drone ID plus timestamp uniquely identifies a position pair:
 replays do not append duplicates, and changed coordinates update that pair.
-`_persistedPositions` tracks the stored prefix; correcting an older position
+`DroneTimeSeries._persistedPositions` tracks the stored prefix; correcting an older position
 rewinds this progress so it is written again.
 
 Every 100 ms, the worker copies dirty snapshots while holding the cache mutex,
@@ -177,7 +185,7 @@ when they arrive during a write. Failed writes leave history and progress intact
 for retry. Cache destruction joins the worker and attempts a final flush. A
 persistent database error is logged; the in-memory cache is not crash-durable.
 
-The sole database write API is `StoreDrone(Drone&)`. In one transaction it
+The sole database write API is `StoreDrone(Drone const&, DroneTimeSeries&)`. In one transaction it
 upserts client/device identity, current online/state/position attributes, and
 new or corrected historical coordinates using bound parameters. Missing names
 become `Client_<id>` / `Device_<id>`; device IDs are global and both IDs must be

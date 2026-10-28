@@ -27,19 +27,24 @@ namespace{
         }
     }
     //
-    void MergePosition( Drone& drone, TimeseriesPos const& position ){
-        auto found = std::find_if( drone._position.begin(), drone._position.end(),
+    void MergePosition( CacheData& entry, TimeseriesPos const& position ){
+        if ( position._timestamp >= entry._Drone._position._timestamp
+            || (entry._Drone._position._timestamp == std::chrono::sys_time<std::chrono::milliseconds>{}
+                && entry._TimeSeries._position.empty()) ){
+            entry._Drone._position = position;
+        }
+        auto found = std::find_if( entry._TimeSeries._position.begin(), entry._TimeSeries._position.end(),
             [&]( auto const& value ){
                 return value._timestamp == position._timestamp;
             } );
-        if ( found == drone._position.end() ){
-            drone._position.push_back( position );
+        if ( found == entry._TimeSeries._position.end() ){
+            entry._TimeSeries._position.push_back( position );
         }
         else if ( found->_posLat != position._posLat || found->_posLang != position._posLang ){
             *found = position;
             // A correction to stored history must be written again.
-            drone._persistedPositions = std::min( drone._persistedPositions,
-                static_cast<std::size_t>(found - drone._position.begin()) );
+            entry._TimeSeries._persistedPositions = std::min( entry._TimeSeries._persistedPositions,
+                static_cast<std::size_t>(found - entry._TimeSeries._position.begin()) );
         }
     }
     //
@@ -70,6 +75,14 @@ DroneCache::DroneCache( std::shared_ptr<database> dbc )
     if ( !_db ){
         throw std::invalid_argument( "Database is required" );
     }
+    // Load before starting the worker or exposing this cache to MQTT handlers.
+    // Failure aborts construction instead of publishing defaults over stored state.
+    for ( auto& [drone, timeseries] : _db->LoadDrones() ){
+        CacheData entry;
+        entry._Drone = std::move( drone );
+        entry._TimeSeries = std::move( timeseries );
+        _droneCache.emplace( entry._Drone._droneId, std::move( entry ) );
+    }
     tDBWorker = std::jthread( [this](){
         while ( !Exit() ){
             std::this_thread::sleep_for( std::chrono::milliseconds(100) );
@@ -95,6 +108,8 @@ void DroneCache::StoreDevice( dronegroundcontrol::Device const& device ){
     MergeDevice( identity, device );
     auto& entry = _droneCache[device.id()];
     MergeDevice( entry._Drone, device );
+    entry._TimeSeries._droneId = entry._Drone._droneId;
+    entry._TimeSeries._clientId = entry._Drone._clientId;
     entry._bDirty = true;
     ++entry._version;
 }
@@ -139,6 +154,8 @@ void DroneCache::StoreAttribute( dronegroundcontrol::AttributeRequest const& req
     const std::lock_guard lock( _mutex );
     auto& entry = _droneCache[identity._droneId];
     MergeDevice( entry._Drone, request.device() );
+    entry._TimeSeries._droneId = entry._Drone._droneId;
+    entry._TimeSeries._clientId = entry._Drone._clientId;
     if ( online.has_value() ){
         entry._Drone._online = *online;
     }
@@ -146,7 +163,7 @@ void DroneCache::StoreAttribute( dronegroundcontrol::AttributeRequest const& req
         entry._Drone._state = *state;
     }
     for ( auto const& position : positions ){
-        MergePosition( entry._Drone, position );
+        MergePosition( entry, position );
     }
     entry._bDirty = true;
     ++entry._version;
@@ -202,8 +219,10 @@ void DroneCache::StoreTimeseries( dronegroundcontrol::TimeseriesRequest const& r
     const std::lock_guard lock( _mutex );
     auto& entry = _droneCache[identity._droneId];
     MergeDevice( entry._Drone, request.device() );
+    entry._TimeSeries._droneId = entry._Drone._droneId;
+    entry._TimeSeries._clientId = entry._Drone._clientId;
     for ( auto const& position : positions ){
-        MergePosition( entry._Drone, position );
+        MergePosition( entry, position );
     }
     entry._bDirty = true;
     ++entry._version;
@@ -211,23 +230,25 @@ void DroneCache::StoreTimeseries( dronegroundcontrol::TimeseriesRequest const& r
 
 //
 void DroneCache::Synchronize(){
-    std::vector<std::pair<uint64_t, Drone>> snapshots;
+    std::vector<CacheData> snapshots;
     {
         const std::lock_guard lock( _mutex );
         for ( auto const& [id, entry] : _droneCache ){
             if ( entry._bDirty ){
-                snapshots.emplace_back( entry._version, entry._Drone );
+                snapshots.push_back( entry );
             }
         }
     }
-    for ( auto& [version, drone] : snapshots ){
+    for ( auto& snapshot : snapshots ){
+        auto& drone = snapshot._Drone;
+        const auto version = snapshot._version;
         try{
-            _db->StoreDrone( drone ); // Advances persistence progress after commit.
+            _db->StoreDrone( drone, snapshot._TimeSeries ); // Advances persistence progress after commit.
             const std::lock_guard lock( _mutex );
             auto& entry = _droneCache.at( drone._droneId );
             // Preserve all history, including samples appended during this write.
             if ( entry._version == version ){
-                entry._Drone._persistedPositions = drone._persistedPositions;
+                entry._TimeSeries._persistedPositions = snapshot._TimeSeries._persistedPositions;
             }
             entry._bDirty = entry._version != version;
         }
