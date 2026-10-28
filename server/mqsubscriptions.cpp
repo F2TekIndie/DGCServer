@@ -1,16 +1,15 @@
 
 #include "mqsubscriptions.h"
 #include "mqtt.h"
-#include "db.h"
+#include "dronecache.h"
 #include "devices.pb.h"
 #include "attributes.pb.h"
 #include "timeseries.pb.h"
-#include <iostream>
 #include <stdexcept>
 
 
 
-dgcSubscriptions::dgcSubscriptions( std::shared_ptr<database> dbc  )
+dgcSubscriptions::dgcSubscriptions( std::shared_ptr<DroneCache> dbc  )
     :_dbc( dbc )
 {
     if (!_dbc) throw std::invalid_argument("Database is required");

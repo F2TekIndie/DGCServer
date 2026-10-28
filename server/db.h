@@ -2,17 +2,13 @@
 #pragma once
 
 #include "config.h"
+#include "drone.h"
 #include <string>
 #include <mutex>
 
 
 
 //
-namespace dronegroundcontrol {
-    class Device;
-    class AttributeRequest;
-    class TimeseriesRequest;
-}
 struct sqlite3;
 struct Configuration;
 
@@ -27,9 +23,7 @@ struct database{
     const database& operator=(const database& rhs) = delete;
 
     //
-    void StoreDevice( dronegroundcontrol::Device const& device );
-    void StoreAttribute( dronegroundcontrol::AttributeRequest const& request );
-    void StoreTimeseries( dronegroundcontrol::TimeseriesRequest const& request );
+    void StoreDrone( Drone& drone );
     
 private:
     sqlite3* _db={nullptr};

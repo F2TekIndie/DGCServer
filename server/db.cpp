@@ -1,13 +1,15 @@
 #include "db.h"
-#include "devices.pb.h"
-#include "attributes.pb.h"
-#include "timeseries.pb.h"
+#include "drone.h"
 #include <sqlite3.h>
-#include <charconv>
+#include <cstdint>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <algorithm>
+#include <limits>
+#include <locale>
+#include <sstream>
 
 
 
@@ -89,51 +91,7 @@ namespace{
         bool _committed = false;
     };
 
-    //
-    void RequireName( std::string const& name ){
-        if ( name.empty() || name.find_first_not_of( ' ' ) == std::string::npos ){
-            throw std::invalid_argument( "Missing value name" );
-        }
-    }
 
-    //
-    void UpsertDevice( sqlite3* db, dronegroundcontrol::Device const& device ){
-        if ( !device.id() || !device.has_client_id() || !device.client_id().id() ){
-            throw std::invalid_argument( "Device and client IDs must be nonzero" );
-        }
-        // Unregistered clients/devices are accepted. Preserve existing metadata
-        // when telemetry provides only IDs.
-        Statement client( db, "INSERT INTO client(id,name) VALUES(?,?) "
-                              "ON CONFLICT(id) DO UPDATE SET name=CASE WHEN ?<>'' THEN excluded.name ELSE client.name END" );
-        client.Integer( 1, device.client_id().id() );
-        client.Text( 2, device.client_id().name().empty()
-                            ? "Client_" + std::to_string( device.client_id().id() )
-                            : device.client_id().name() );
-        client.Text( 3, device.client_id().name() );
-        client.Execute();
-        //
-        Statement entry( db, "INSERT INTO device(id,client_id,name,type) VALUES(?,?,?,?) "
-                             "ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id, "
-                             "name=CASE WHEN ?<>'' THEN excluded.name ELSE device.name END, "
-                             "type=CASE WHEN ?<>'' THEN excluded.type ELSE device.type END" );
-        entry.Integer( 1, device.id() );
-        entry.Integer( 2, device.client_id().id() );
-        entry.Text( 3, device.name().empty() ? "Device_" + std::to_string( device.id() ) : device.name() );
-        entry.Text( 4, device.type() );
-        entry.Text( 5, device.name() );
-        entry.Text( 6, device.type() );
-        entry.Execute();
-    }
-
-    //
-    double Coordinate( std::string const& text, double limit ){
-        double result{};
-        const auto parsed = std::from_chars( text.data(), text.data() + text.size(), result );
-        if ( parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite( result ) || std::abs( result ) > limit ){
-            throw std::invalid_argument( "Invalid position coordinate" );
-        }
-        return result;
-    }
 }
 
 //
@@ -158,92 +116,85 @@ database::~database(){
 }
 
 //
-void database::StoreDevice( dronegroundcontrol::Device const& device ){
-    const std::lock_guard lock( _mutex );
-    Transaction transaction( _db );
-    UpsertDevice( _db, device );
-    transaction.Commit();
-}
-
-//
-void database::StoreAttribute( dronegroundcontrol::AttributeRequest const& request ){
-    const auto& value = request.attrib();
-    RequireName( value.name() );
-    //
-    const std::lock_guard lock( _mutex );
-    Transaction transaction( _db );
-    UpsertDevice( _db, request.device() );
-    //
-    Statement entry( _db,
-                     "INSERT INTO attributes(device_id,name,value_type,bool_value,string_value,uint32_value,latitude,longitude) "
-                     "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(device_id,name) DO UPDATE SET "
-                     "value_type=excluded.value_type,bool_value=excluded.bool_value,string_value=excluded.string_value,"
-                     "uint32_value=excluded.uint32_value,latitude=excluded.latitude,longitude=excluded.longitude" );
-    entry.Integer( 1, request.device().id() );
-    entry.Text( 2, value.name() );
-    // Unbound parameters remain NULL, clearing the previous oneof value on update.
-    switch ( value.value_case() ){
-        case dronegroundcontrol::Attribute::kBValue:
-            entry.Text( 3, "bool" );
-            entry.Integer( 4, value.bvalue() );
-            break;
-        case dronegroundcontrol::Attribute::kSValue:
-            entry.Text( 3, "string" );
-            entry.Text( 5, value.svalue() );
-            break;
-        case dronegroundcontrol::Attribute::kIValue:
-            entry.Text( 3, "uint32" );
-            entry.Integer( 6, value.ivalue() );
-            break;
-        case dronegroundcontrol::Attribute::kPos:
-            entry.Text( 3, "position" );
-            entry.Real( 7, Coordinate( value.pos().lat(), 90 ) );
-            entry.Real( 8, Coordinate( value.pos().long_(), 180 ) );
-            break;
-        default:
-            throw std::invalid_argument( "Attribute has no value" );
+void database::StoreDrone( Drone& drone ){
+    if ( !drone._droneId || !drone._clientId ){
+        throw std::invalid_argument( "Device and client IDs must be nonzero" );
+    }
+    for ( auto const& position : drone._position ){
+        if ( !std::isfinite( position._posLat ) || std::abs( position._posLat ) > 90
+            || !std::isfinite( position._posLang ) || std::abs( position._posLang ) > 180 ){
+            throw std::invalid_argument( "Invalid position coordinate" );
+        }
     }
     //
-    entry.Execute();
-    transaction.Commit();
-}
-
-//
-void database::StoreTimeseries( dronegroundcontrol::TimeseriesRequest const& request ){
-    const auto& value = request.data();
-    RequireName( value.name() );
-    sqlite3_int64 timestamp{};
-    const auto& text = value.timestamp();
-    const auto parsed = std::from_chars( text.data(), text.data() + text.size(), timestamp );
-    if ( parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ){
-        throw std::invalid_argument( "Timestamp must be UTC Unix milliseconds" );
-    }
     const std::lock_guard lock( _mutex );
     Transaction transaction( _db );
-    UpsertDevice( _db, request.device() );
+    // Accept new clients/devices without prior registration. Drone has no client
+    // name or device type, so preserve that metadata on existing records.
+    Statement client( _db, "INSERT INTO client(id,name) VALUES(?,?) ON CONFLICT(id) DO NOTHING" );
+    client.Integer( 1, drone._clientId );
+    client.Text( 2, "Client_" + std::to_string( drone._clientId ) );
+    client.Execute();
     //
-    Statement entry( _db, "INSERT INTO timeseries(device_id,name,timestamp_ms,value_type,bool_value,string_value,uint32_value) "
-                          "VALUES(?,?,?,?,?,?,?)" );
-    entry.Integer( 1, request.device().id() );
-    entry.Text( 2, value.name() );
-    entry.Integer( 3, timestamp );
-    switch ( value.value_case() ){
-        case dronegroundcontrol::TimeSerie::kBValue:
-            entry.Text( 4, "bool" );
-            entry.Integer( 5, value.bvalue() );
-            break;
-        case dronegroundcontrol::TimeSerie::kSValue:
-            entry.Text( 4, "string" );
-            entry.Text( 6, value.svalue() );
-            break;
-        case dronegroundcontrol::TimeSerie::kIValue:
-            entry.Text( 4, "uint32" );
-            entry.Integer( 7, value.ivalue() );
-            break;
-        default:
-            throw std::invalid_argument( "Timeseries sample has no value" );
+    Statement device( _db, "INSERT INTO device(id,client_id,name,type) VALUES(?,?,?,'') "
+                          "ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id, "
+                          "name=CASE WHEN ?<>'' THEN excluded.name ELSE device.name END" );
+    device.Integer( 1, drone._droneId );
+    device.Integer( 2, drone._clientId );
+    device.Text( 3, drone._name.empty() ? "Device_" + std::to_string( drone._droneId ) : drone._name );
+    device.Text( 4, drone._name );
+    device.Execute();
+    // Each statement starts with NULL value columns, clearing obsolete oneof
+    // columns if an attribute previously had a different type.
+    auto latest = std::max_element( drone._position.begin(), drone._position.end(),
+        []( auto const& left, auto const& right ){
+            return left._timestamp < right._timestamp;
+        } );
+    auto store = [&]( char const* name, char const* type ){
+        Statement entry( _db,
+            "INSERT INTO attributes(device_id,name,value_type,bool_value,uint32_value,latitude,longitude) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(device_id,name) DO UPDATE SET "
+            "value_type=excluded.value_type,bool_value=excluded.bool_value,string_value=NULL,"
+            "uint32_value=excluded.uint32_value,latitude=excluded.latitude,longitude=excluded.longitude" );
+        entry.Integer( 1, drone._droneId );
+        entry.Text( 2, name );
+        entry.Text( 3, type );
+        if ( std::string_view( name ) == "online" ){
+            entry.Integer( 4, drone._online );
+        }
+        else if ( std::string_view( name ) == "state" ){
+            entry.Integer( 5, drone._state );
+        }
+        else{
+            entry.Real( 6, latest->_posLat );
+            entry.Real( 7, latest->_posLang );
+        }
+        entry.Execute();
+    };
+    store( "online", "bool" );
+    store( "state", "uint32" );
+    if ( latest != drone._position.end() ){
+        store( "position", "position" );
+    }
+    // Preserve the existing string-based coordinate history contract.
+    auto storeSample = [&]( TimeseriesPos const& position, char const* name, double coordinate ){
+        std::ostringstream text;
+        text.imbue( std::locale::classic() );
+        text.precision( std::numeric_limits<double>::max_digits10 );
+        text << coordinate;
+        Statement sample( _db,
+            "INSERT INTO timeseries(device_id,name,timestamp_ms,value_type,string_value) VALUES(?,?,?,'string',?)" );
+        sample.Integer( 1, drone._droneId );
+        sample.Text( 2, name );
+        sample.Integer( 3, position._timestamp.time_since_epoch().count() );
+        sample.Text( 4, text.str() );
+        sample.Execute();
+    };
+    for ( auto const& position : drone._position ){
+        storeSample( position, "latitude", position._posLat );
+        storeSample( position, "longitude", position._posLang );
     }
     //
-    entry.Execute();
     transaction.Commit();
+    drone._position.clear();
 }

@@ -2,7 +2,6 @@
 #pragma once
 
 #include "mqclient.h"
-#include "db.h"
 #include <boost/asio.hpp>
 #include <boost/mqtt5.hpp>
 #include <string>
@@ -10,11 +9,13 @@
 #include <memory>
 
 
+//
+struct DroneCache;
 
 //
 struct dgcSubscriptions : public ISubsciptionHandler{
     //
-    explicit dgcSubscriptions( std::shared_ptr<database> dbc );
+    explicit dgcSubscriptions( std::shared_ptr<DroneCache> dbc );
     ~dgcSubscriptions();
     //
     std::vector<boost::mqtt5::subscribe_topic> Subscriptions() const;
@@ -25,5 +26,5 @@ private:
     void HandleAttributes( std::string const& sMessage );
     void HandleTimeseries( std::string const& sMessage );
     //
-    std::shared_ptr<database> _dbc;
+    std::shared_ptr<DroneCache> _dbc;
 };

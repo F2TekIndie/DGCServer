@@ -106,9 +106,6 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
                 else if ( ec ){
                     break;
                 }
-                // SYNCED CALL TO THE DATABASE!!!
-                // PERFORMANCE IS DEPENDING ON WRITING SPEED NOW!!!
-                // RETHINK OR DECOUPLE
                 _subscriptionHandler->HandleMessage( topic, payload );
             }
 

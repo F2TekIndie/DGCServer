@@ -120,7 +120,7 @@ namespace{
 }
 
 //
-rpcServer::rpcServer( Configuration const& config, std::shared_ptr<database> db )
+rpcServer::rpcServer( Configuration const& config, std::shared_ptr<DroneCache> db )
     :_config( config )
     ,_db( db )
     ,_server( nullptr )

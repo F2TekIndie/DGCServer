@@ -1,5 +1,5 @@
 
-#include "drone.h"
+#include "dronemanager.h"
 #include "mqtt.h"
 #include "devices.pb.h"
 #include "attributes.pb.h"
@@ -64,7 +64,7 @@ namespace{
         std::cout << "  ID: " << drone._droneId << std::endl;
         std::cout << "  State: " << drone._state << std::endl;
         std::cout << "  Online: " << (drone._online?"True":"False") << std::endl;
-        std::cout << "  Pos: " << drone._posLang << " " << drone._posLat << std::endl;
+        std::cout << "  Pos: " << drone._position.back()._posLang << " " << drone._position.back()._posLat << std::endl;
     }
     //
     void CalculateNewDronePosition( Drone& drone, double dtSeconds ){
@@ -80,8 +80,8 @@ namespace{
             drone._headingRad + turnRate(_rng) * dtSeconds, 2.0 * std::numbers::pi
         );
 
-        const double latitude = drone._posLat * radiansPerDegree;
-        const double longitude = drone._posLang * radiansPerDegree;
+        const double latitude = drone._position.back()._posLat * radiansPerDegree;
+        const double longitude = drone._position.back()._posLang * radiansPerDegree;
         const double distance = drone._speedMps * dtSeconds / earthRadiusM;
 
         // Move along the Earth's surface; heading zero means north.
@@ -99,8 +99,9 @@ namespace{
                 std::sin(latitude) * std::sin(nextLatitude)
         );
 
-        drone._posLat = nextLatitude / radiansPerDegree;
-        drone._posLang = std::remainder( nextLongitude / radiansPerDegree, 360.0 );
+        drone._position.back()._timestamp = std::chrono::time_point_cast<std::chrono::milliseconds>( std::chrono::system_clock::now() );
+        drone._position.back()._posLat = nextLatitude / radiansPerDegree;
+        drone._position.back()._posLang = std::remainder( nextLongitude / radiansPerDegree, 360.0 );
     }
 }
 
@@ -112,7 +113,7 @@ DroneManager::DroneManager( mqClient& mqc )
 void DroneManager::Init( size_t nCount ){
     assert( nCount > 0);
     // Resize
-    _drones.resize( nCount, {0, SimulationCliendId, "Drone_", DS_INIT, false, 10.08, 58.08, 0.0, 5.0 } );
+    _drones.resize( nCount, {0, SimulationCliendId, "Drone_", DS_INIT, false, {{std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}}, 0.0, 5.0 } );
     // Init
     std::uniform_real_distribution<double> heading{ 0.0, 2.0*std::numbers::pi };
     std::uniform_real_distribution<double> speed{ 2.0, 12.0 };
@@ -175,29 +176,32 @@ void DroneManager::UpdateAttributes( Drone const& drone ){
     dronegroundcontrol::AttributeRequest message;
     *message.mutable_device() = MakeDevice(drone);
     //
-    auto* attribute = message.mutable_attrib();
+    auto* attributes = message.mutable_attributes();
+    auto* attribute = attributes->add_timeseries();
     attribute->set_name("online");
     attribute->set_bvalue(drone._online);
-    PublishMessage(_mqttClient, dronesdk::mqtt::EP_ATTRIBUTES, message);
     //
+    attribute = attributes->add_timeseries();
     attribute->set_name("state");
-    attribute->set_ivalue(drone._state); // Replaces the previous oneof value.
+    attribute->set_ivalue(drone._state);
     PublishMessage(_mqttClient, dronesdk::mqtt::EP_ATTRIBUTES, message);
 }
 
 void DroneManager::UpdateTimeseries( Drone const& drone ){
-    const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>( std::chrono::system_clock::now().time_since_epoch() ).count();
+    const auto timestamp = drone._position.back()._timestamp.time_since_epoch().count();
     //
     dronegroundcontrol::TimeseriesRequest message;
     *message.mutable_device() = MakeDevice(drone);
     //
-    auto* sample = message.mutable_data();
+    auto* timeseries = message.mutable_timeseries();
+    auto* sample = timeseries->add_timeseries();
     sample->set_timestamp(std::to_string(timestamp)); // UTC Unix milliseconds.
     sample->set_name("latitude");
-    sample->set_svalue(CoordinateString(drone._posLat));
-    PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
+    sample->set_svalue(CoordinateString(drone._position.back()._posLat));
     //
+    sample = timeseries->add_timeseries();
+    sample->set_timestamp(std::to_string(timestamp));
     sample->set_name("longitude");
-    sample->set_svalue(CoordinateString(drone._posLang));
+    sample->set_svalue(CoordinateString(drone._position.back()._posLang));
     PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
 }

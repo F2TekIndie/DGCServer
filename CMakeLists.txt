@@ -22,6 +22,7 @@ add_executable(dgcserver
     server/db.h server/db.cpp
     server/grpc.h server/grpc.cpp
     server/mqsubscriptions.h server/mqsubscriptions.cpp
+    server/dronecache.h server/dronecache.cpp
     sdk/mqclient.h sdk/mqclient.cpp
     sdk/config.h
 )
@@ -46,7 +47,7 @@ install(TARGETS dgcserver
 
 add_executable(dgcsim
     sim/main.cpp
-    sim/drone.h sim/drone.cpp
+    sim/dronemanager.h sim/dronemanager.cpp
     sdk/mqclient.h sdk/mqclient.cpp
     sdk/config.h
 )
@@ -74,7 +75,7 @@ if(BUILD_TESTING)
         tests/mqtt_persistence.cpp
         server/db.cpp
         server/mqsubscriptions.cpp
-        sim/drone.cpp
+        sim/dronemanager.cpp
     )
     target_include_directories(mqtt_persistence_test PRIVATE
         sdk

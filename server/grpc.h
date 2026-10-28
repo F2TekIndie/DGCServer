@@ -9,12 +9,12 @@
 
 //
 struct Configuration;
-struct database;
+struct DroneCache;
 struct IServices;
 
 //
 struct rpcServer{
-    explicit rpcServer( Configuration const& config, std::shared_ptr<database> db );
+    explicit rpcServer( Configuration const& config, std::shared_ptr<DroneCache> db );
     ~rpcServer();
     
     //
@@ -24,7 +24,7 @@ struct rpcServer{
 
 private:
     Configuration const& _config;
-    std::shared_ptr<database> _db;
+    std::shared_ptr<DroneCache> _db;
     std::vector< std::shared_ptr<IServices> > _services;
     std::unique_ptr<grpc::Server> _server;
     //
