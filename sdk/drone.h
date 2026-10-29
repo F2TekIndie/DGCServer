@@ -19,7 +19,7 @@ struct TimeseriesPos{
 
 struct Drone{
     // Persistet members
-    uint32_t       _droneId;
+    std::string    _droneId;
     uint32_t       _clientId;
     std::string    _name;
     uint32_t       _state;
@@ -31,7 +31,7 @@ struct Drone{
 };
 
 struct DroneTimeSeries{
-    uint32_t       _droneId;
+    std::string    _droneId;
     uint32_t       _clientId;
     // Persistet members
     std::vector< TimeseriesPos > _position;

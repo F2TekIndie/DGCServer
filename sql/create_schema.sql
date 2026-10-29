@@ -19,7 +19,14 @@ CREATE TABLE "user" (
 );
 
 CREATE TABLE device (
-    id INTEGER PRIMARY KEY CHECK (id BETWEEN 1 AND 4294967295),
+    id TEXT PRIMARY KEY NOT NULL CHECK (
+        length(id)=36 AND id=lower(id)
+        AND substr(id,9,1)='-' AND substr(id,14,1)='-'
+        AND substr(id,19,1)='-' AND substr(id,24,1)='-'
+        AND length(replace(id,'-',''))=32
+        AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'
+        AND id<>'00000000-0000-0000-0000-000000000000'
+    ),
     client_id INTEGER NOT NULL REFERENCES client(id) ON DELETE RESTRICT,
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     type TEXT NOT NULL DEFAULT '',
@@ -29,7 +36,7 @@ CREATE TABLE device (
 -- One current value per named device attribute; columns mirror Attribute.oneof.
 CREATE TABLE attributes (
     id INTEGER PRIMARY KEY,
-    device_id INTEGER NOT NULL REFERENCES device(id) ON DELETE RESTRICT,
+    device_id TEXT NOT NULL REFERENCES device(id) ON DELETE RESTRICT,
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     value_type TEXT NOT NULL CHECK (value_type IN ('bool', 'string', 'uint32', 'position')),
     bool_value INTEGER CHECK (bool_value IS NULL OR typeof(bool_value) = 'integer' AND bool_value IN (0, 1)),
@@ -50,7 +57,7 @@ CREATE TABLE attributes (
 -- A position pair is unique per device/timestamp; other metrics may repeat.
 CREATE TABLE timeseries (
     id INTEGER PRIMARY KEY,
-    device_id INTEGER NOT NULL REFERENCES device(id) ON DELETE RESTRICT,
+    device_id TEXT NOT NULL REFERENCES device(id) ON DELETE RESTRICT,
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     timestamp_ms INTEGER NOT NULL CHECK (typeof(timestamp_ms) = 'integer'),
     value_type TEXT NOT NULL CHECK (value_type IN ('bool', 'string', 'uint32')),

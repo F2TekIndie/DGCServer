@@ -1,5 +1,6 @@
 #include "db.h"
 #include "drone.h"
+#include "droneidentity.h"
 #include <sqlite3.h>
 #include <cstdint>
 #include <cmath>
@@ -146,7 +147,7 @@ database::~database(){
 }
 
 //
-void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
+void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries, bool create ){
     if ( drone._droneId != timeseries._droneId || drone._clientId != timeseries._clientId ){
         throw std::invalid_argument( "Drone and timeseries identity mismatch" );
     }
@@ -157,8 +158,8 @@ void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
     if ( timeseries._persistedPositions > timeseries._position.size() ){
         throw std::invalid_argument( "Persisted position count exceeds history size" );
     }
-    if ( !drone._droneId || !drone._clientId ){
-        throw std::invalid_argument( "Device and client IDs must be nonzero" );
+    if ( !ValidDroneId(drone._droneId) || !drone._clientId ){
+        throw std::invalid_argument( "A valid device UUID and nonzero client ID are required" );
     }
     for ( auto const& position : timeseries._position ){
         if ( !std::isfinite( position._posLat ) || std::abs( position._posLat ) > 90
@@ -166,25 +167,33 @@ void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
             throw std::invalid_argument( "Invalid position coordinate" );
         }
     }
+    ValidateDroneName( drone._name );
     //
     const std::lock_guard lock( _mutex );
     Transaction transaction( _db );
-    // Accept new clients/devices without prior registration. Drone has no client
-    // name or device type, so preserve that metadata on existing records.
-    Statement client( _db, "INSERT INTO client(id,name) VALUES(?,?) ON CONFLICT(id) DO NOTHING" );
-    client.Integer( 1, drone._clientId );
-    client.Text( 2, "Client_" + std::to_string( drone._clientId ) );
-    client.Execute();
-    //
-    Statement device( _db, "INSERT INTO device(id,client_id,name,type,position_timestamp_ms) VALUES(?,?,?,'',?) "
-                          "ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,position_timestamp_ms=excluded.position_timestamp_ms, "
-                          "name=CASE WHEN ?<>'' THEN excluded.name ELSE device.name END" );
-    device.Integer( 1, drone._droneId );
-    device.Integer( 2, drone._clientId );
-    device.Text( 3, drone._name.empty() ? "Device_" + std::to_string( drone._droneId ) : drone._name );
-    device.Integer( 4, drone._position._timestamp.time_since_epoch().count() );
-    device.Text( 5, drone._name );
+    if ( create ){
+        Statement client( _db, "INSERT INTO client(id,name) VALUES(?,?) ON CONFLICT(id) DO NOTHING" );
+        client.Integer( 1, drone._clientId );
+        client.Text( 2, "Client_" + std::to_string(drone._clientId) );
+        client.Execute();
+        Statement insert( _db, "INSERT INTO device(id,client_id,name) VALUES(?,?,?)" );
+        insert.Text( 1, drone._droneId );
+        insert.Integer( 2, drone._clientId );
+        insert.Text( 3, drone._name );
+        insert.Execute();
+    }
+    // Updates must never create a device or move it to another client.
+    Statement device( _db, "UPDATE device SET position_timestamp_ms=?, "
+                          "name=CASE WHEN ?<>'' THEN ? ELSE name END WHERE id=? AND client_id=?" );
+    device.Integer( 1, drone._position._timestamp.time_since_epoch().count() );
+    device.Text( 2, drone._name );
+    device.Text( 3, drone._name );
+    device.Text( 4, drone._droneId );
+    device.Integer( 5, drone._clientId );
     device.Execute();
+    if ( sqlite3_changes(_db) == 0 ){
+        throw std::out_of_range( "Drone not found" );
+    }
     // Each statement starts with NULL value columns, clearing obsolete oneof
     // columns if an attribute previously had a different type.
     auto store = [&]( char const* name, char const* type ){
@@ -193,7 +202,7 @@ void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
             "VALUES(?,?,?,?,?,?,?) ON CONFLICT(device_id,name) DO UPDATE SET "
             "value_type=excluded.value_type,bool_value=excluded.bool_value,string_value=NULL,"
             "uint32_value=excluded.uint32_value,latitude=excluded.latitude,longitude=excluded.longitude" );
-        entry.Integer( 1, drone._droneId );
+        entry.Text( 1, drone._droneId );
         entry.Text( 2, name );
         entry.Text( 3, type );
         if ( std::string_view( name ) == "online" ){
@@ -221,7 +230,7 @@ void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
             "INSERT INTO timeseries(device_id,name,timestamp_ms,value_type,string_value) VALUES(?,?,?,'string',?) "
             "ON CONFLICT(device_id,name,timestamp_ms) WHERE name IN ('latitude','longitude') DO UPDATE SET "
             "value_type=excluded.value_type,string_value=excluded.string_value,bool_value=NULL,uint32_value=NULL" );
-        sample.Integer( 1, drone._droneId );
+        sample.Text( 1, drone._droneId );
         sample.Text( 2, name );
         sample.Integer( 3, position._timestamp.time_since_epoch().count() );
         sample.Text( 4, text.str() );
@@ -238,23 +247,27 @@ void database::StoreDrone( Drone const& drone, DroneTimeSeries& timeseries ){
 }
 
 //
-std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones(){
+std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones( std::string const& droneId ){
     const std::lock_guard lock( _mutex );
     // Restore identities, attributes and history from a consistent snapshot.
     Transaction transaction( _db, "BEGIN" );
     std::vector<std::pair<Drone, DroneTimeSeries>> drones;
-    std::map<uint32_t, std::size_t> indexes;
+    std::map<std::string, std::size_t> indexes;
     Statement devices( _db,
         "SELECT d.id,d.client_id,d.name,o.bool_value,s.uint32_value,p.latitude,p.longitude,d.position_timestamp_ms FROM device d "
         "LEFT JOIN attributes o ON o.device_id=d.id AND o.name='online' AND o.value_type='bool' "
         "LEFT JOIN attributes s ON s.device_id=d.id AND s.name='state' AND s.value_type='uint32' "
         "LEFT JOIN attributes p ON p.device_id=d.id AND p.name='position' AND p.value_type='position' "
-        "ORDER BY d.id" );
+        "WHERE (?='' OR d.id=?) ORDER BY d.id" );
+    devices.Text( 1, droneId );
+    devices.Text( 2, droneId );
     while ( devices.Read() ){
         Drone drone{};
-        drone._droneId = static_cast<uint32_t>( devices.ColumnInteger(0) );
+        drone._droneId = devices.ColumnText(0);
         drone._clientId = static_cast<uint32_t>( devices.ColumnInteger(1) );
         drone._name = devices.ColumnText( 2 );
+        if ( !ValidDroneId(drone._droneId) ) throw std::runtime_error("Database contains an invalid drone UUID");
+        ValidateDroneName( drone._name );
         drone._online = devices.ColumnInteger( 3 ) != 0;
         drone._state = static_cast<uint32_t>( devices.ColumnInteger(4) );
         indexes.emplace( drone._droneId, drones.size() );
@@ -272,7 +285,9 @@ std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones(){
         "LEFT JOIN timeseries lat ON lat.device_id=p.device_id AND lat.timestamp_ms=p.timestamp_ms "
         "AND lat.name='latitude' AND lat.value_type='string' "
         "LEFT JOIN timeseries lon ON lon.device_id=p.device_id AND lon.timestamp_ms=p.timestamp_ms "
-        "AND lon.name='longitude' AND lon.value_type='string' ORDER BY p.device_id,p.timestamp_ms" );
+        "AND lon.name='longitude' AND lon.value_type='string' WHERE (?='' OR p.device_id=?) ORDER BY p.device_id,p.timestamp_ms" );
+    positions.Text( 1, droneId );
+    positions.Text( 2, droneId );
     auto coordinate = []( std::string const& text, double limit ){
         double value{};
         const auto result = std::from_chars( text.data(), text.data() + text.size(), value );
@@ -283,7 +298,7 @@ std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones(){
         return value;
     };
     while ( positions.Read() ){
-        const auto id = static_cast<uint32_t>( positions.ColumnInteger(0) );
+        const auto id = positions.ColumnText(0);
         const auto found = indexes.find( id );
         if ( found == indexes.end() || positions.IsNull(2) || positions.IsNull(3) ){
             throw std::runtime_error( "Incomplete or orphaned stored position pair" );
@@ -298,4 +313,24 @@ std::vector<std::pair<Drone, DroneTimeSeries>> database::LoadDrones(){
     }
     transaction.Commit();
     return drones;
+}
+
+void database::DeleteDrone( std::string const& droneId ){
+    const std::lock_guard lock( _mutex );
+    Transaction transaction( _db );
+    for ( auto sql : {"DELETE FROM timeseries WHERE device_id=?",
+                     "DELETE FROM attributes WHERE device_id=?", "DELETE FROM device WHERE id=?"} ){
+        Statement statement( _db, sql );
+        statement.Text( 1, droneId );
+        statement.Execute();
+    }
+    transaction.Commit();
+}
+
+std::vector<std::string> database::LoadDroneIds(){
+    const std::lock_guard lock( _mutex );
+    Statement query( _db, "SELECT id FROM device" );
+    std::vector<std::string> ids;
+    while ( query.Read() ) ids.push_back( query.ColumnText(0) );
+    return ids;
 }

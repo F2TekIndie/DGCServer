@@ -1,5 +1,6 @@
 #include "mqsubscriptions.h"
 #include "dronecache.h"
+#include "droneidentity.h"
 #include "db.h"
 #include "dronemanager.h"
 #include "config.h"
@@ -49,9 +50,9 @@ namespace{
                 throw std::runtime_error( sqlite3_errmsg(db) );
             }
         }
-        sqlite3_int64 Scalar( char const* sql ){
+        sqlite3_int64 Scalar( std::string const& sql ){
             sqlite3_stmt* statement = nullptr;
-            Require( sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK, "Prepare query" );
+            Require( sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr) == SQLITE_OK, "Prepare query" );
             const int result = sqlite3_step( statement );
             const auto value = sqlite3_column_int64( statement, 0 );
             sqlite3_finalize( statement );
@@ -101,19 +102,21 @@ int main( int argc, char** argv ){
 
         mqClient mqtt( config );
         DroneManager simulator( mqtt );
-        simulator.Init( 1 );
+        const auto firstId = cache->CreateDevice(99)._droneId;
+        const auto externalId = NewDroneId();
+        simulator.Init( {firstId} );
         Require( publishCount == 3, "One device, attribute batch and timeseries batch publish" );
         Require( devices.size() == 1 && attributes.size() == 1 && timeseries.size() == 1, "Topic routing" );
-        Require( devices[0].id() == 1 && devices[0].client_id().id() == 99 && devices[0].name() == "Drone_1", "Device identity" );
+        Require( devices[0].id() == firstId && devices[0].client_id().id() == 99 && devices[0].name() == "Drone_1", "Device identity" );
         auto const& attributeBatch = attributes[0];
-        Require( attributeBatch.device().id() == 1 && !attributeBatch.has_attrib(), "Attribute batch envelope" );
+        Require( attributeBatch.device().id() == firstId && !attributeBatch.has_attrib(), "Attribute batch envelope" );
         Require( attributeBatch.attributes().timeseries_size() == 2, "Attribute batch size" );
         auto const& online = attributeBatch.attributes().timeseries(0);
         auto const& state = attributeBatch.attributes().timeseries(1);
         Require( online.name() == "online" && online.has_bvalue() && !online.bvalue(), "Online attribute" );
         Require( state.name() == "state" && state.has_ivalue() && state.ivalue() == 0, "State attribute" );
         auto const& history = timeseries[0];
-        Require( history.device().id() == 1 && !history.has_data() && history.timeseries().timeseries_size() == 2, "Timeseries batch envelope" );
+        Require( history.device().id() == firstId && !history.has_data() && history.timeseries().timeseries_size() == 2, "Timeseries batch envelope" );
         auto const& latitude = history.timeseries().timeseries(0);
         auto const& longitude = history.timeseries().timeseries(1);
         Require( latitude.name() == "latitude" && latitude.has_svalue(), "Latitude sample" );
@@ -125,9 +128,27 @@ int main( int argc, char** argv ){
         handler->HandleMessage( "/unknown", "ignored" );
         Require( devices.size() == 1 && attributes.size() == 1 && timeseries.size() == 1, "Invalid payloads must not reach cache" );
 
+        // Valid telemetry cannot register an unknown drone.
+        auto unknown = devices[0];
+        unknown.set_id(NewDroneId());
+        bool rejectedUnknown = false;
+        try{ cache->StoreDevice(unknown); }catch (std::out_of_range const&){ rejectedUnknown = true; }
+        Require(rejectedUnknown, "Unknown metadata rejected");
+        auto unknownAttributes = attributes[0];
+        *unknownAttributes.mutable_device() = unknown;
+        rejectedUnknown = false;
+        try{ cache->StoreAttribute(unknownAttributes); }catch (std::out_of_range const&){ rejectedUnknown = true; }
+        Require(rejectedUnknown, "Unknown attributes rejected");
+        auto unknownHistory = timeseries[0];
+        *unknownHistory.mutable_device() = unknown;
+        rejectedUnknown = false;
+        try{ cache->StoreTimeseries(unknownHistory); }catch (std::out_of_range const&){ rejectedUnknown = true; }
+        Require(rejectedUnknown && !cache->GetDrone(unknown), "Unknown history cannot create a drone");
+
         // Incomplete coordinate messages are rejected, not stored as pending.
         auto pair = timeseries[0];
-        pair.mutable_device()->set_id(2);
+        const auto secondId = cache->CreateDevice(99)._droneId;
+        pair.mutable_device()->set_id(secondId);
         auto incomplete = pair;
         incomplete.mutable_timeseries()->mutable_timeseries()->RemoveLast();
         bool incompleteRejected = false;
@@ -142,7 +163,7 @@ int main( int argc, char** argv ){
         pair.mutable_timeseries()->mutable_timeseries(0)->set_svalue("1");
         cache->StoreTimeseries(pair); // Same key updates coordinates.
         auto invalid = attributes[0];
-        invalid.mutable_device()->set_id(3);
+        invalid.mutable_device()->set_id(NewDroneId());
         invalid.mutable_attributes()->mutable_timeseries(1)->set_svalue("wrong type");
         bool invalidRejected = false;
         try{ cache->StoreAttribute(invalid); }catch (std::invalid_argument const&){ invalidRejected = true; }
@@ -151,12 +172,12 @@ int main( int argc, char** argv ){
         receiver = nullptr;
         handler.reset();
         cache.reset();
-        Require(check.Scalar("SELECT count(*) FROM device") == 2, "Cache accepts unknown drones keyed by ID");
-        Require(check.Scalar("SELECT count(*) FROM attributes WHERE device_id=1") == 3, "Persist cached current state");
-        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=1") == 2, "Persist simulator position pair once");
-        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=2 AND timestamp_ms=1700000000123") == 2, "Store coordinate batch at same timestamp");
-        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id=2 AND name='latitude' AND string_value='1'") == 1, "Correct existing coordinate pair");
-        Require(check.Scalar("SELECT count(*) FROM device WHERE id=3") == 0, "Bad batch cannot create partial drone");
+        Require(check.Scalar("SELECT count(*) FROM device") == 2, "Only registered drones are stored");
+        Require(check.Scalar("SELECT count(*) FROM attributes WHERE device_id='" + firstId + "'") == 3, "Persist cached current state");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id='" + firstId + "'") == 2, "Persist simulator position pair once");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id='" + secondId + "' AND timestamp_ms=1700000000123") == 2, "Store coordinate batch at same timestamp");
+        Require(check.Scalar("SELECT count(*) FROM timeseries WHERE device_id='" + secondId + "' AND name='latitude' AND string_value='1'") == 1, "Correct existing coordinate pair");
+        Require(check.Scalar("SELECT count(*) FROM device WHERE id='" + invalid.device().id() + "'") == 0, "Bad batch cannot create partial drone");
         check.Execute("DELETE FROM timeseries; DELETE FROM attributes; DELETE FROM device; DELETE FROM client;");
 
         // Verify the new snapshot persistence API independently of the cache.
@@ -173,9 +194,13 @@ int main( int argc, char** argv ){
         TimeseriesPos position{stamp, std::stod(longitude.svalue()), std::stod(latitude.svalue())};
         drone._position = position;
         droneHistory._position.push_back(position);
-        db->StoreDrone( drone, droneHistory );
-        Require( check.Scalar("SELECT count(*) FROM device WHERE id=1 AND client_id=99") == 1, "Automatic identity creation" );
-        Require( check.Scalar("SELECT count(*) FROM attributes WHERE device_id=1") == 3, "Snapshot attribute count" );
+        bool missingRejected = false;
+        try{ db->StoreDrone(drone, droneHistory); }catch (std::out_of_range const&){ missingRejected = true; }
+        Require(missingRejected && check.Scalar("SELECT count(*) FROM device") == 0,
+                "Snapshot persistence cannot create a device");
+        db->StoreDrone( drone, droneHistory, true );
+        Require( check.Scalar("SELECT count(*) FROM device WHERE id='" + firstId + "' AND client_id=99") == 1, "Registered identity persistence" );
+        Require( check.Scalar("SELECT count(*) FROM attributes WHERE device_id='" + firstId + "'") == 3, "Snapshot attribute count" );
         drone._online = true;
         drone._state = 5;
         position._posLat = 59;
@@ -199,9 +224,54 @@ int main( int argc, char** argv ){
         db->StoreDrone(drone, replay);
         Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Database key deduplicates replay");
 
+        // A SQL row appearing after cache startup must hydrate on a cache miss.
+        {
+            DroneCache reader(db);
+            auto missing = devices[0];
+            missing.set_id(externalId);
+            Require(!reader.GetDrone(missing), "Missing drone stays absent");
+            Drone external = drone;
+            external._droneId = externalId;
+            external._state = 42;
+            auto externalHistory = droneHistory;
+            externalHistory._droneId = externalId;
+            externalHistory._persistedPositions = 0;
+            db->StoreDrone(external, externalHistory, true);
+            for (int attempt = 0; attempt < 100 && !reader.GetDrone(missing); ++attempt)
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            auto restored = reader.GetDrone(missing);
+            Require(restored && restored->_Drone._state == 42, "Read miss loads SQL drone");
+            Require(restored->_TimeSeries._position.size() == 2, "Read miss loads SQL history");
+            missing.mutable_client_id()->set_id(123);
+            Require(!reader.GetDrone(missing), "Read respects supplied client identity");
+            Require(reader.ListDrones(99).size() == 2, "Client list includes SQL fallback");
+            Require(reader.ListDrones(123).empty(), "Client list filters drones");
+        }
+        check.Execute("DELETE FROM timeseries WHERE device_id='" + externalId + "'; DELETE FROM attributes WHERE device_id='" + externalId + "'; DELETE FROM device WHERE id='" + externalId + "'");
+        {
+            DroneCache writer(db);
+            Drone external = drone;
+            external._droneId = externalId;
+            external._state = 42;
+            auto externalHistory = droneHistory;
+            externalHistory._droneId = externalId;
+            externalHistory._persistedPositions = 0;
+            db->StoreDrone(external, externalHistory, true);
+            auto metadata = devices[0];
+            metadata.set_id(externalId);
+            metadata.set_name("Late SQL drone");
+            for (int attempt = 0; attempt < 100 && !writer.GetDrone(metadata); ++attempt)
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            writer.StoreDevice(metadata);
+            const auto restored = writer.GetDrone(metadata);
+            Require(restored && restored->_Drone._state == 42, "Write miss preserves SQL attributes");
+            Require(restored->_TimeSeries._position.size() == 2, "Write miss preserves SQL history");
+        }
+        check.Execute("DELETE FROM timeseries WHERE device_id='" + externalId + "'; DELETE FROM attributes WHERE device_id='" + externalId + "'; DELETE FROM device WHERE id='" + externalId + "'");
+
         // Restart hydration must preserve values absent from incoming telemetry.
         auto loaded = db->LoadDrones();
-        Require(loaded.size() == 1 && loaded[0].first._droneId == 1 && loaded[0].first._clientId == 99, "Restore drone identity");
+        Require(loaded.size() == 1 && loaded[0].first._droneId == firstId && loaded[0].first._clientId == 99, "Restore drone identity");
         Require(loaded[0].first._online && loaded[0].first._state == 5, "Restore online and state");
         Require(loaded[0].first._position._posLat == 59 && loaded[0].first._position._timestamp == position._timestamp, "Restore current position independently of history");
         Require(loaded[0].second._position.size() == 2 && loaded[0].second._persistedPositions == 2, "Restore persisted history progress");
@@ -229,7 +299,7 @@ int main( int argc, char** argv ){
         Require(check.Scalar("SELECT uint32_value FROM attributes WHERE name='state'") == 5, "Position after restart preserves state");
         Require(check.Scalar("SELECT count(*) FROM timeseries") == 4, "Restored correction retains unique history");
         // Keep the existing rollback expectations independent of restart tests.
-        check.Execute("UPDATE device SET name='Drone_1' WHERE id=1");
+        check.Execute("UPDATE device SET name='Drone_1' WHERE id='" + firstId + "'");
 
         position._posLat = std::numeric_limits<double>::quiet_NaN();
         drone._position = position;

@@ -4,6 +4,7 @@
 #include <grpcpp/server.h>
 #include <memory>
 #include <thread>
+#include <vector>
 
 
 
@@ -19,6 +20,7 @@ struct rpcServer{
     
     //
     bool listen();
+    int listeningPort() const { return _listeningPort; }
     void start();
     void stop();
 
@@ -28,5 +30,6 @@ private:
     std::vector< std::shared_ptr<IServices> > _services;
     std::unique_ptr<grpc::Server> _server;
     //
+    int _listeningPort{0};
     std::jthread tRunner;    
 };

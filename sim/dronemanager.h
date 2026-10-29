@@ -17,7 +17,7 @@ struct DroneManager{
     DroneManager( DroneManager const& rhs ) = delete;
     DroneManager const& operator=( DroneManager const& rhs ) = delete;
     //
-    void Init( size_t nCount );    // Id, Name, Online, State, Position
+    void Init( std::vector<std::string> const& ids );    // Id, Name, Online, State, Position
     void Update( double dtSeconds );              // Online, State, Position
 
 private:

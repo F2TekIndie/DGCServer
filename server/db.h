@@ -24,8 +24,10 @@ struct database{
     const database& operator=(const database& rhs) = delete;
 
     //
-    void StoreDrone( Drone const& drone, DroneTimeSeries& timeseries );
-    std::vector<std::pair<Drone, DroneTimeSeries>> LoadDrones();
+    void DeleteDrone( std::string const& droneId );
+    void StoreDrone( Drone const& drone, DroneTimeSeries& timeseries, bool create = false );
+    std::vector<std::pair<Drone, DroneTimeSeries>> LoadDrones( std::string const& droneId = {} );
+    std::vector<std::string> LoadDroneIds();
     
 private:
     sqlite3* _db={nullptr};

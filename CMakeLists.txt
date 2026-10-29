@@ -71,6 +71,16 @@ install(TARGETS dgcsim
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(grpc_cache_test
+        tests/grpc_cache.cpp
+        server/grpc.cpp
+        server/db.cpp
+        server/dronecache.cpp
+    )
+    target_include_directories(grpc_cache_test PRIVATE sdk server)
+    target_link_libraries(grpc_cache_test PRIVATE DGCProto SQLite3::SQLite3 Boost::system Threads::Threads)
+    add_test(NAME grpc_cache COMMAND grpc_cache_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/sql/create_schema.sql")
     add_executable(mqtt_persistence_test
         tests/mqtt_persistence.cpp
         server/db.cpp

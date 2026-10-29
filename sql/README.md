@@ -28,25 +28,28 @@ script applies only to its own connection.
 
 ## Current persistence path
 
-MQTT payloads update `DroneCache`; a worker synchronizes dirty drone snapshots
-approximately every 100 ms through `StoreDrone(Drone const&, DroneTimeSeries&)`. At startup the cache loads existing device identities, online/state attributes,
-and complete position history before accepting updates. Loaded history is marked
-already persisted, so hydration does not duplicate samples. Failed reads or
-incomplete stored coordinate pairs abort cache construction. No prior registration
-is required. Missing clients/devices are created with `Client_<id>` /
-`Device_<id>` names. Nonempty drone names update existing records. Client name
-and device type are preserved on existing rows because `Drone` has no fields
-for them. A device's client association can change.
+MQTT and gRPC operations read or update `DroneCache` only. Its worker performs
+all SQL access: startup hydration, periodic discovery of SQL-only UUIDs, snapshot
+writes, and deletion processing. No handler synchronously queries SQL. External
+creations become visible after the next successful discovery cycle.
 
-One transaction stores identity, `online`, `state`, the newest available
-`position` attribute, and new/corrected position history. Bound parameters keep
-payloads separate from SQL. Failures roll back the snapshot and do not advance
-its persistence progress. The cache retains data for another attempt.
+Only `CreateDevice` creates new cached drones. It generates a UUID v4 and queues
+a new snapshot; ordinary updates require an existing UUID and matching client.
+`StoreDrone(Drone const&, DroneTimeSeries&, bool create)` inserts identity only
+for new snapshots. Identity, attributes and history commit atomically. Client
+name and device type are preserved for existing rows. Invalid UUIDs and empty,
+whitespace-only or NUL-containing stored names are rejected. Empty names in
+update envelopes mean unchanged and are permitted.
 
-The schema supports boolean, string, uint32, and position attributes. Current
-cache ingestion supports only online/state/position attributes and latitude/
-longitude timeseries samples. Broader application queries and gRPC database
-operations remain unimplemented.
+Deletion removes the cache entry immediately and queues a tombstone. The worker
+deletes history, attributes and identity transactionally. Failed writes and
+deletions remain pending for retry; tombstones prevent rehydration. Shutdown
+asks the worker for a final flush. A successful RPC acknowledges cached state,
+not a durable SQL commit.
+
+To create drones directly in SQL, run `python3 scripts/create_drones.py X --db
+dgc.sqlite`; optional `--client-id` defaults to 99. This is a standalone utility,
+not a server request path.
 
 ## Position representation and uniqueness
 
@@ -71,7 +74,8 @@ History currently has no automatic eviction policy.
 
 ## Constraints and indexes
 
-Client/device IDs must be `1..4294967295`. Boolean values are 0 or 1; uint32
+Client IDs must be `1..4294967295`. Device IDs and dependent foreign keys are
+canonical lowercase non-nil UUID strings. Boolean values are 0 or 1; uint32
 values are `0..4294967295`. String columns reject BLOBs. Each attribute/sample
 has exactly one typed value. Latitude must be `-90..90` and longitude `-180..180`.
 
@@ -88,7 +92,7 @@ ctest --test-dir build/local --output-on-failure
 ```
 
 The test uses a temporary database and the real cache worker, replacing only the
-MQTT network boundary. It checks simulator batches, routing, unknown drones,
+MQTT network boundary. It checks simulator batches, routing, rejection of unknown drones,
 coordinate pairing/replay, snapshot persistence, retained history, timestamps,
 validation, rollback, and foreign keys. No broker is required.
 

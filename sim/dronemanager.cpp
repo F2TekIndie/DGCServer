@@ -1,6 +1,8 @@
 
 #include "dronemanager.h"
 #include "mqtt.h"
+#include "droneidentity.h"
+#include <set>
 #include "devices.pb.h"
 #include "attributes.pb.h"
 #include "timeseries.pb.h"
@@ -110,16 +112,20 @@ DroneManager::DroneManager( mqClient& mqc )
 {
 }
 
-void DroneManager::Init( size_t nCount ){
-    assert( nCount > 0);
+void DroneManager::Init( std::vector<std::string> const& ids ){
+    const auto nCount = ids.size();
+    if ( ids.empty() || std::set<std::string>(ids.begin(), ids.end()).size() != ids.size()
+        || !std::all_of(ids.begin(), ids.end(), ValidDroneId) ){
+        throw std::invalid_argument("Simulator requires distinct registered drone UUIDs");
+    }
     // Resize
-    _drones.resize( nCount, {0, SimulationCliendId, "Drone_", DS_INIT, false, {std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}, 0.0, 5.0 } );
+    _drones.resize( nCount, {{}, SimulationCliendId, "Drone_", DS_INIT, false, {std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}, 0.0, 5.0 } );
     // Init
     std::uniform_real_distribution<double> heading{ 0.0, 2.0*std::numbers::pi };
     std::uniform_real_distribution<double> speed{ 2.0, 12.0 };
     //
     for ( auto idx{0}; idx < nCount; ++idx ){
-        _drones[ idx ]._droneId = 1+idx;
+        _drones[ idx ]._droneId = ids[idx];
         _drones[ idx ]._name += std::to_string( 1+idx );
         _drones[ idx ]._headingRad = heading( _rng );
         _drones[ idx ]._speedMps = speed( _rng );
