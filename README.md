@@ -1,295 +1,232 @@
 # DGCServer
 
-**Status: proof-of-concept prototype.** The simulator publishes telemetry over
-MQTT and the server persists it in SQLite. Desktop telemetry integration remains incomplete. This is not production-ready.
+Proof-of-concept server and simulator for Drone Ground Control. The server
+accepts gRPC requests and MQTT telemetry through an in-memory drone cache. Its
+DB worker synchronizes that cache with SQLite.
 
-## Current behavior
+## Projects and data flow
 
-| Executable | Current behavior |
-| --- | --- |
-| `dgcserver` | Opens SQLite, starts MQTT subscription processing and a gRPC server, then waits for Ctrl+C (SIGINT). |
-| `dgcsim` | Simulates drones, publishes Protobuf identity/attributes/position samples over MQTT, and runs until Ctrl+C. |
-
-The gRPC services read and write through the drone cache. MQTT device, attribute, and timeseries payloads
-are deserialized into an in-memory drone cache and synchronized to SQLite by a
-worker. Drones must be registered before telemetry updates are accepted. The database wrapper enables foreign
-keys, but does not create tables.
-
-## Repository layout
-
-Keep these repositories alongside each other:
+Keep the repositories alongside each other:
 
 ```text
 DroneGroundControl/
-├── DGC/
-├── DGCServer/
-└── DroneSDK/
+├── DGC/          Qt desktop application
+├── DGCServer/    Server, simulator, and SQL schema
+└── DroneSDK/     Shared Protobuf messages and gRPC bindings
 ```
 
-- [DGC](../DGC/README.md): Qt desktop video/map application.
-- [DroneSDK](../DroneSDK/README.md): Protobuf messages and gRPC bindings.
+```text
+DGC → gRPC → server services → DroneCache ↔ DB worker ↔ SQLite
+                                  ↑
+dgcsim → MQTT broker → subscriptions
+```
+
+- [DGC](../DGC/README.md) accesses the server through its `gRPCClient` class.
+- [DroneSDK](../DroneSDK/README.md) defines the messages and RPC interfaces.
+- [Database documentation](sql/README.md) describes storage and constraints.
+
+MQTT and gRPC handlers read or update cached state only. They do not query SQL
+or wait for persistence. Only the DB worker calls the database read/write APIs.
+The standalone SQL seeding script is separate from the server request paths.
 
 ## Dependencies
 
-- CMake 3.21 or later and a C++23 compiler with `std::jthread` support.
-- Boost.System, Boost.Asio, and Boost.MQTT5 headers. The Boost installation must
-  include `boost/mqtt5/mqtt_client.hpp` and `boost/asio/as_tuple.hpp`.
+- CMake 3.21 or later and a C++23 compiler.
+- Boost.System, Boost.Asio, Boost.UUID, and Boost.MQTT5 headers, including
+  `boost/mqtt5/mqtt_client.hpp` and `boost/asio/as_tuple.hpp`.
 - Threading support.
 - Protobuf compiler and development library.
 - gRPC C++ development files, `gRPCConfig.cmake`, and `grpc_cpp_plugin`.
-- SQLite3 development library; the `sqlite3` CLI for manual schema creation.
-- An MQTT broker for messaging; the application does not launch one.
+- SQLite3 development library; the `sqlite3` CLI for schema initialization.
+- Python 3 for the optional drone-creation script.
+- An MQTT broker for running the server/simulator workflow.
 
-Qt and GStreamer are not required for this project. If CMake cannot find gRPC,
-check that its development package is installed, not only its runtime/plugins.
-For a custom installation, set `CMAKE_PREFIX_PATH` or `gRPC_DIR`.
+Qt and GStreamer are not required. For custom library installations, configure
+`CMAKE_PREFIX_PATH` or the relevant package directory, such as `gRPC_DIR`.
 
-## Build
+## Build and test
 
-From DGCServer:
-
-```sh
-cmake -S . -B build/local -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/local --parallel
-```
-
-CMake builds the sibling `DroneSDK/protocol` target and generates both Protobuf
-message code and gRPC bindings. Both executables link `DGCProto`; only the server
-links SQLite, as does the persistence test. The former SDK `sources/` directory
-is no longer included. CTest enables the persistence test through `BUILD_TESTING`.
-
-## Initialize and run
-
-Create the schema once in an empty database, then run from the same directory:
+Run from DGCServer:
 
 ```sh
-sqlite3 -bail dgc.sqlite < sql/create_schema.sql
-./build/local/dgcserver
-```
-
-Press Ctrl+C to request server shutdown. Run the simulator separately:
-
-```sh
-./build/local/dgcsim 100
-```
-
-The simulator requires a drone count of at least 100. It publishes initial
-identity, attributes, and position for each drone, then updates randomized state
-and movement approximately every 10 seconds using measured elapsed time. Press
-Ctrl+C to stop it; shutdown may wait for the current sleep interval.
-
-See [database documentation](sql/README.md) for relationships and value formats.
-Opening SQLite can create an empty file; it does not apply the SQL schema.
-
-## Configuration and endpoints
-
-`loadConfiguration("server.ini")` currently ignores the filename and returns
-hard-coded defaults from `sdk/config.h`. Creating an INI file has no effect.
-
-| Setting | Default |
-| --- | --- |
-| SQLite file | `dgc.sqlite`, relative to the process working directory |
-| MQTT broker | `127.0.0.1:1883` |
-| gRPC listener | `127.0.0.1:5600`, insecure credentials |
-| MQTT diagnostics | `_dbgLogging = true`: Boost.MQTT5 debug logger |
-
-The gRPC TCP port is separate from the desktop receiver's UDP video port 5600.
-The server subscribes to these exact MQTT topics, including the leading slash:
-
-- `/device`
-- `/status`
-- `/device/attribute`
-- `/device/timeseries`
-
-No wildcard matching is configured. Simulator payloads are binary Protobuf:
-`Device` on `/device`, `AttributeRequest.attributes` on `/device/attribute`
-(containing `online` and `state`), and `TimeseriesRequest.timeseries` on
-`/device/timeseries` (containing `latitude` and `longitude`). Each group is one
-MQTT publish per drone, rather than one publish per value. Every request
-includes device/client identity. Coordinates
-use string values with round-trip double precision, and timestamp strings are
-UTC Unix milliseconds. Both coordinate samples share one timestamp. Initial
-values are sent for every drone; later position samples are sent for traveling
-drones. Server handlers validate these messages and update the cache; the worker
-persists each dirty drone snapshot transactionally.
-
-Publishing and all four subscriptions use QoS 2 (`exactly_once`). The publish
-completion handler receives an error code, broker reason code, and PUBCOMP
-properties. Subscription QoS remains subject to broker approval and publisher
-QoS; it cannot upgrade a lower-QoS publisher.
-
-Publishing uses RETAIN. Retained storage holds only the latest payload for each
-exact topic, not one per drone or attribute. A newly started server cannot
-recover all drone state from these shared retained topics. QoS 2 governs MQTT
-protocol delivery; it does not provide exactly-once SQLite transactions or an
-acknowledgment that the database write succeeded.
-
-## Implementation and limitations
-
-- `sdk/mqclient.*`: MQTT wrapper; one worker runs its Asio context. Publish,
-  disconnect, and subscription setup are posted to that context. Connect is
-  currently called before starting the worker.
-- `sdk/config.h`, `sdk/mqtt.h`: default settings and topic constants.
-- `server/db.*`: SQLite connection ownership, foreign keys, and transactional writes.
-- `server/grpc.*`: cache-backed services, listener, and waiting worker.
-- `server/mqsubscriptions.*`: topic routing and Protobuf decoding into the cache.
-- `server/dronecache.*`: cache keyed by drone ID and background synchronization.
-- `sdk/drone.h`: shared drone state, retained positions, and persistence progress.
-- `sim/dronemanager.*`: randomized state/movement updates and Protobuf publishing.
-- `sql/create_schema.sql`: complete new-database setup, including position
-  uniqueness and current-position timestamps.
-
-Shutdown currently posts MQTT disconnect and immediately stops its context, so
-protocol-level disconnect completion is not guaranteed. Subscription handling
-logs every result but decides subscription success from only the first result.
-Exceptions escaping MQTT callbacks can terminate the worker/process. gRPC startup failure is reported, but the entry point still
-returns zero. Configuration parsing, authentication,
-and live-broker end-to-end tests remain future work.
-
-## MQTT persistence
-
-Initialize a new database with `sql/create_schema.sql` before starting the
-server. This single script includes all required tables, columns, and indexes;
-see the [database README](sql/README.md).
-
-The cache worker hydrates stored drones, attributes, and history before the
-server accepts requests. It then runs approximately every 100 ms, persisting
-dirty snapshots, processing deletion tombstones, and discovering SQL-only drone
-UUIDs. Only that worker calls database read/write methods. MQTT and gRPC requests
-read or change memory only; SQL-created drones become available after the next
-successful discovery cycle. Unknown UUIDs are rejected until then.
-
-Drone IDs are random UUIDs represented as canonical lowercase strings in the
-cache, SQLite, and Protobuf `Device.id`. Client IDs remain nonzero uint32 values.
-Only `CreateDevice` creates drones through the server. Other writes require an
-existing cached drone with the matching client. Nonempty names containing only
-whitespace or any NUL byte are rejected before changing any state. An omitted
-(empty) name preserves the current name.
-
-The receive handler accepts metadata, `online` boolean and `state` uint32
-attributes, and latitude/longitude history. The `position` attribute receives a
-server wall-clock timestamp. Unsupported names and wrong value types are
-rejected. Each batch is validated before modifying its entry. `/status` remains
-unsupported.
-
-Timeseries batches must contain both latitude and longitude for each timestamp
-in the same message. There is no pending-coordinate storage across messages.
-Legacy single attributes are supported, but a lone latitude or longitude sample
-is rejected. Requests must use either the single-value or batch field, not both.
-
-`Drone` holds current attributes and a single `_position`. `DroneTimeSeries`
-holds retained position history separately. Positions use
-`std::chrono::sys_time<std::chrono::milliseconds>` and remain in `DroneTimeSeries._position`
-after storage. Drone ID plus timestamp uniquely identifies a position pair:
-replays do not append duplicates, and changed coordinates update that pair.
-`DroneTimeSeries._persistedPositions` tracks the stored prefix; correcting an older position
-rewinds this progress so it is written again.
-
-Every 100 ms, the worker copies dirty snapshots while holding the cache mutex,
-then releases it before database I/O. Version counters keep newer updates dirty
-when they arrive during a write. Failed writes leave history and progress intact
-for retry. Cache destruction asks the worker for a final flush, then joins it. A
-persistent database error is logged; the in-memory cache is not crash-durable.
-
-`StoreDrone(Drone const&, DroneTimeSeries&, bool create)` is a worker persistence
-operation. Only snapshots marked new can insert a client/device; updates never
-create an unknown identity or change ownership. Identity, current attributes,
-and new/corrected historical coordinates commit in one transaction. New names
-default to `Device_<uuid>`. Device type and client name are preserved on existing
-SQL records because `Drone` does not represent those fields.
-
-Latitude/longitude history remains string-valued in SQLite, while the current
-position attribute uses numeric degrees. Both coordinate rows are upserted
-atomically, with a unique index on device/name/timestamp for those two metrics.
-Database uniqueness prevents duplicate position rows across cache restarts;
-MQTT QoS 2 itself is not a database commit acknowledgment.
-
-History is currently retained without an eviction limit. Monitoring cache size,
-flush latency, and dirty-drone count is not implemented yet. Rebuild simulator
-and server together after protocol changes.
-
-Register simulator drones in an initialized database before starting telemetry:
-
-```sh
-python3 scripts/create_drones.py 100 --db dgc.sqlite
-```
-
-The script uses SQL directly and defaults to client 99, matching the simulator.
-Use `--client-id` to choose another client. It generates UUID v4 IDs and default
-names in one transaction. An initialized database is required. Start DGCServer
-before `dgcsim`; the simulator obtains the first requested number of registered
-UUIDs for client 99 using `ListDevices`, rather than inventing numeric IDs.
-
-Initialize development databases with the current `sql/create_schema.sql`.
-Regenerate and rebuild Protobuf consumers after protocol changes.
-
-Run the payload-to-database integration test (no broker required):
-
-```sh
-cmake -S . -B build/local -DBUILD_TESTING=ON
+cmake -S . -B build/local -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
 cmake --build build/local --parallel
 ctest --test-dir build/local --output-on-failure
 ```
 
-## Diagnostics and load
+The build generates the sibling SDK's `DGCProto` library and creates:
 
-Boost.MQTT5 debug output reports DNS/TCP connection attempts and MQTT handshake
-results. Set `_dbgLogging` to false in `sdk/config.h` to select error-level
-logging. `async_run` still uses `detached`, so its final completion is not
-reported through an application callback.
+| Target | Purpose |
+| --- | --- |
+| `dgcserver` | gRPC services, MQTT subscriptions, cache, and SQLite synchronization. |
+| `dgcsim` | Discover registered drones through gRPC and publish simulated telemetry over MQTT. |
+| `grpc_cache_test` | Exercise RPCs through a local gRPC listener and temporary SQLite database. |
+| `mqtt_persistence_test` | Exercise simulator payloads, subscription routing, cache, and persistence with the MQTT network boundary replaced. |
 
-SQLite writes run on the cache worker, outside the MQTT receive handler. There
-is no dirty-cache counter or throughput/latency reporting yet. Broker
-statistics alone do not measure how many messages are waiting for database
-storage.
+Tests require no MQTT broker. `grpc_cache_test` requires permission to open a
+loopback listener. Set `BUILD_TESTING=OFF` to omit the test targets.
 
-For a broker you run manually, enable verbose output with `mosquitto -v`.
-Do not start a second broker on an occupied port. For an existing broker, use
-its logging configuration (`log_dest stderr`, `log_type all`) and view its
-configured output destination. If managed by systemd with stderr logging:
+## Initialize and run
 
-```sh
-journalctl -u mosquitto -f
-```
-
-Watch broker statistics separately, if allowed by its access controls:
+Run the schema once against a new, empty development database. Seed at least
+100 drones for the simulator's client, which is client 99:
 
 ```sh
-mosquitto_sub -h 127.0.0.1 -v -t '$SYS/broker/#'
+sqlite3 -bail dgc.sqlite < sql/create_schema.sql
+python3 scripts/create_drones.py 100 --db dgc.sqlite
 ```
 
-Stored-message totals include retained data and queues across clients; they are
-not a per-DGCServer outstanding-message count. Verbose logs can affect load
-measurements.
+The Python script opens an existing database, generates UUID v4 IDs, and creates
+`Device_<uuid>` names in one transaction. It creates the client if needed. Use
+`--client-id` to seed another client:
 
-## gRPC cache operations
+```sh
+python3 scripts/create_drones.py 10 --db dgc.sqlite --client-id 7
+```
 
-All RPC handlers interact only with `DroneCache`. They neither call SQL nor wait
-for the worker. Lists are served from memory and never reload SQL history.
+Start an MQTT broker separately, then run the server from the directory
+containing `dgc.sqlite`:
 
-`CreateDevice` allocates a UUID v4 and `Device_<uuid>` name in memory. `DeletDevice`
-immediately removes the cached entry and queues a deletion tombstone. The worker
-later removes SQL history, attributes, and identity in one transaction; clients
-and users remain. A tombstone prevents SQL refresh from reimporting a deleted
-drone while deletion is pending or failing. In-flight writes are followed by
-deletions on the same worker. Replacements get new UUIDs, so delayed telemetry
-for a deleted identity cannot update the replacement.
+```sh
+./build/local/dgcserver
+```
 
-`GetAttribute` now accepts `AttributeQuery` with `device` and `name` (`online`,
-`state`, or `position`). `GetTimeseries` accepts `TimeseriesQuery` with `device`,
-`name` (`latitude` or `longitude`), and optional `timestamp_ms`. Omit the timestamp
-for the latest historical sample. `GetTimeseriesRange` accepts
-`TimeseriesRangeQuery` with optional inclusive `start_timestamp_ms` and
-`end_timestamp_ms`; omitted bounds are unbounded. An empty series name selects
-both coordinates. Results are ordered by ascending timestamp, latitude before
-longitude at the same timestamp. Collection responses use `start=0` and
-`range=number of returned entries`; pagination is not implemented.
+In another terminal, run the simulator:
 
-Regenerate and rebuild clients after protocol changes. Unknown drones/samples
-return `NOT_FOUND`; malformed UUIDs, invalid names, selectors, bounds, and values
-return `INVALID_ARGUMENT`. Successful writes, including creation/deletion, mean
-the cache accepted the operation, not that SQLite committed it. SQL failures
-remain pending for worker retry and are logged. A process crash or persistent
-SQL error during shutdown can lose pending changes. Tests cover all RPC methods,
-cache operations while SQL is exclusively locked, deletion retry/tombstones,
-UUIDs, name validation, MQTT routing, persistence, and SQL drone creation.
+```sh
+./build/local/dgcsim
+```
+
+The simulator does not take a drone-count argument. It calls `ListDevices` for
+client 99, requires at least 100 returned drones, and uses all returned UUIDs.
+It publishes initial metadata, online/state attributes, and position samples,
+then updates simulated state and movement approximately every two seconds using
+measured elapsed time. Start the server before the simulator. Stop each process
+with Ctrl+C; the simulator can wait for its current sleep interval to finish.
+
+The server opens SQLite but does not create tables. Use the current schema for
+development databases. SQL-created drones
+are imported by the worker's discovery cycle if the server is already running.
+
+## Configuration and endpoints
+
+`loadConfiguration("server.ini")` currently ignores the filename and returns
+source defaults from `sdk/config.h`. Creating an INI file has no effect.
+
+| Setting | Default |
+| --- | --- |
+| SQLite file | `dgc.sqlite`, relative to the process working directory. |
+| MQTT broker | `127.0.0.1:1883`. |
+| gRPC listener | `127.0.0.1:5600`, insecure credentials. |
+| MQTT diagnostics | `_dbgLogging = true`, enabling the Boost.MQTT5 debug logger. |
+
+The gRPC TCP listener is independent of DGC's UDP video receiver on port 5600.
+The server does not generate or relay camera video.
+
+## Drone cache and persistence
+
+Drone IDs are canonical lowercase UUID strings; new drones use UUID v4.
+Client IDs are nonzero uint32 values. Only `CreateDevice` creates drones through
+the server. MQTT metadata, attribute, and history updates require an existing
+cached UUID and matching client ID. Unknown IDs are rejected.
+
+The worker loads identities, current attributes, and history before the cache
+constructor completes. Read failures abort startup. Approximately every 100 ms,
+the worker synchronizes dirty snapshots and deletion tombstones, then discovers
+SQL-only UUIDs. Newly seeded drones become available after a successful discovery
+cycle; handlers do not perform fallback SQL queries themselves.
+
+`CreateDevice` inserts a new cached drone with a `Device_<uuid>` default name.
+`DeletDevice` immediately removes it from the cache and queues a tombstone. The
+worker deletes the device's history, attributes, and identity transactionally;
+clients and users remain. Pending tombstones prevent SQL discovery from
+reimporting a drone whose deletion has not yet committed.
+
+Nonempty metadata names containing only whitespace or any NUL byte are rejected
+before modifying the cache. An empty name in an update means unchanged. The
+server's `Drone` stores ID, client ID, name, online/state attributes, current
+position, and simulator movement fields. It does not represent device type or
+client name; existing SQL values for that metadata are preserved.
+
+`DroneTimeSeries` retains timestamped position pairs and tracks its persisted
+prefix. Replaying a timestamp updates its pair instead of appending a duplicate.
+Correcting an older sample rewinds persistence progress so it is written again.
+Historical updates do not move the current position backward in time.
+
+Dirty snapshots are copied under the cache mutex; SQL work happens after that
+mutex is released. Version counters preserve newer changes arriving during a
+write. The worker's snapshot transaction stores identity when marked new,
+current attributes, and new/corrected history. Ordinary updates cannot insert
+unknown identities or change client ownership. Failed writes/deletions remain
+pending for retry and are logged. Shutdown wakes and joins the worker.
+
+RPC success acknowledges a cache change, not an SQL commit. Pending changes are
+not crash-durable, and persistent database failures can leave them unsaved.
+History currently has no retention or eviction limit.
+
+## gRPC operations
+
+The RPC definitions are in `DroneSDK/protocol/`:
+
+| RPC | Request and behavior |
+| --- | --- |
+| `CreateDevice` | `Client`; allocate a cached UUID and default name, returning `Device`. |
+| `DeletDevice` | `Device`; remove the cached drone and queue SQL deletion. The spelling is part of the current protocol. |
+| `ListDevices` | `Client`; return that client's cached identities. |
+| `UpdateAttribute` | `AttributeRequest`; update one attribute or a nonempty batch. |
+| `GetAttribute` | `AttributeQuery`; select `online`, `state`, or `position` by name. |
+| `GetAttributes` | `Device`; return current online, state, and position attributes. |
+| `UpdatePosition` | `PositionRequest`; set coordinates with a server wall-clock timestamp. |
+| `GetPosition` | `Device`; return current coordinates. |
+| `AddTimeseries` | `TimeseriesRequest`; store complete latitude/longitude pairs. |
+| `GetTimeseries` | `TimeseriesQuery`; select latitude or longitude at an optional exact timestamp, or the latest sample when omitted. |
+| `GetTimeseriesRange` | `TimeseriesRangeQuery`; select inclusive optional time bounds and an optional series name. Empty name selects both coordinates. |
+
+History is ordered by ascending timestamp, with latitude before longitude at
+the same timestamp. Collection replies use `start=0` and `range=entry count`;
+pagination is not implemented. Broad queries can exceed client receive limits.
+
+Malformed UUIDs, unsupported names/types, and invalid values/bounds return
+`INVALID_ARGUMENT`. Missing cached drones or exact samples return `NOT_FOUND`.
+An empty history range returns a successful empty collection.
+
+## MQTT telemetry
+
+Subscriptions use these exact topics; there are no wildcard subscriptions:
+
+| Topic | Protobuf payload | Supported data |
+| --- | --- | --- |
+| `/device` | `Device` | Existing device/client identity and nonempty name updates. |
+| `/device/attribute` | `AttributeRequest` | `online` bool, `state` uint32, or `position`. |
+| `/device/timeseries` | `TimeseriesRequest` | String-valued latitude/longitude samples sharing timestamps. |
+| `/status` | Undefined | Subscribed, but unsupported by the handler. |
+
+Coordinates use decimal strings with round-trip double precision. Timestamp
+strings are signed 64-bit UTC Unix milliseconds. A timeseries message must
+contain both coordinates for every timestamp. Single attributes are supported;
+a lone coordinate sample is rejected. Send either the single-value field or a
+nonempty batch, not both. Validation completes before the cache entry changes.
+
+Publishing and subscriptions use QoS 2, subject to broker approval. Publishing
+also uses RETAIN. Each shared topic retains only its latest payload, not a
+separate payload per drone. Retained MQTT data cannot restore the entire fleet;
+startup state comes from SQLite. QoS 2 is a transport guarantee, not an SQL commit
+acknowledgment or a substitute for database uniqueness.
+
+## Diagnostics and current limitations
+
+- Configuration parsing and authentication are not implemented.
+- MQTT disconnect is posted immediately before stopping the Asio context;
+  protocol-level disconnect completion is not guaranteed.
+- Subscription handling logs all results but checks only the first result to
+  decide success.
+- gRPC listener startup failure is logged, but `main` still returns zero.
+- The simulator assumes successful discovery of at least 100 client-99 drones;
+  its empty-result error path is not handled gracefully by `main`.
+- Automated tests cover loopback gRPC and mocked MQTT delivery, not a live broker
+  or camera stream.
+
+Set `_dbgLogging=false` for less MQTT logging. For a manually managed broker,
+`mosquitto -v` enables verbose output. Use broker logs and metrics to inspect
+connections and subscriptions; they do not measure dirty cache entries or SQL
+commit progress.

@@ -1,104 +1,122 @@
-# Database schema
+# SQLite schema
 
-Create a new SQLite database from DGCServer:
+Storage belongs to DGCServer. The desktop application has no SQL access; it
+communicates with the server through gRPC.
+
+## Initialize and seed
+
+Run from DGCServer against a new, empty database:
 
 ```sh
 sqlite3 -bail dgc.sqlite < sql/create_schema.sql
+python3 scripts/create_drones.py 100 --db dgc.sqlite
 ```
 
-Run this once against an empty database. The server opens the database but does
-not create tables automatically. `create_schema.sql` is the only setup script
-and includes all columns, constraints, and indexes required by the current code.
+The server opens its configured file but does not create tables.
+`create_schema.sql` includes all required tables, columns, constraints, and
+indexes.
 
-## Tables and relationships
+The seeding script opens an existing database, generates UUID v4 identities and
+`Device_<uuid>` names, and inserts them in one transaction. `--client-id` defaults
+to 99, matching the simulator; it creates that client if needed. It does not
+seed telemetry history or users. If the server is already running, its worker
+imports new identities on a later discovery cycle.
 
-- `client`: parent for users and devices.
-- `user`: client identity; usernames are case-sensitive and unique per client.
-- `device`: client-linked device identity, with a globally unique device ID.
-- `attributes`: one current value per device/name.
-- `timeseries`: device-linked historical samples.
+## Tables and identity
 
-All child records require an existing parent. Deletion is restricted until
-children are explicitly removed; nothing cascades. Authentication credentials
-and seed records are not supplied.
+| Table | Purpose |
+| --- | --- |
+| `client` | Numeric client identity and name; parent for users and devices. |
+| `user` | Client-linked user identity; username unique within a client. |
+| `device` | UUID identity, client reference, name, type, and current-position timestamp. |
+| `attributes` | One typed current value per device/name pair. |
+| `timeseries` | Timestamped typed samples linked to a device. |
 
-Enable `PRAGMA foreign_keys = ON` on each database connection before starting a
-transaction. The server wrapper already does this. The setting in the schema
-script applies only to its own connection.
+`device.id` is canonical lowercase non-nil UUID text. `attributes.device_id` and
+`timeseries.device_id` are text foreign keys to it. Client IDs remain
+`1..4294967295`; device type and user display name default to empty strings.
 
-## Current persistence path
+All child records require existing parents when foreign keys are enabled.
+Deletion is restricted; nothing cascades. `database::DeleteDrone` explicitly
+deletes history and attributes before deleting the identity. It retains the
+client and any users.
 
-MQTT and gRPC operations read or update `DroneCache` only. Its worker performs
-all SQL access: startup hydration, periodic discovery of SQL-only UUIDs, snapshot
-writes, and deletion processing. No handler synchronously queries SQL. External
-creations become visible after the next successful discovery cycle.
+Enable `PRAGMA foreign_keys=ON` on every connection before transactions. The
+server and seeding script already do this. The schema script's setting applies
+only to the connection running that script.
 
-Only `CreateDevice` creates new cached drones. It generates a UUID v4 and queues
-a new snapshot; ordinary updates require an existing UUID and matching client.
-`StoreDrone(Drone const&, DroneTimeSeries&, bool create)` inserts identity only
-for new snapshots. Identity, attributes and history commit atomically. Client
-name and device type are preserved for existing rows. Invalid UUIDs and empty,
-whitespace-only or NUL-containing stored names are rejected. Empty names in
-update envelopes mean unchanged and are permitted.
+## Cache synchronization
 
-Deletion removes the cache entry immediately and queues a tombstone. The worker
-deletes history, attributes and identity transactionally. Failed writes and
-deletions remain pending for retry; tombstones prevent rehydration. Shutdown
-asks the worker for a final flush. A successful RPC acknowledges cached state,
-not a durable SQL commit.
+Only the server's DB worker calls database read/write methods. MQTT and gRPC
+handlers operate on `DroneCache`; there are no synchronous SQL fallbacks in
+those request paths.
 
-To create drones directly in SQL, run `python3 scripts/create_drones.py X --db
-dgc.sqlite`; optional `--client-id` defaults to 99. This is a standalone utility,
-not a server request path.
+At startup, the worker loads a consistent snapshot of identities, current
+attributes, and complete coordinate history. Restored history is marked
+persisted. Read failures or malformed stored coordinate pairs abort startup.
+Subsequent discovery scans identities and loads history only for UUIDs absent
+from the cache and not pending deletion.
 
-## Position representation and uniqueness
+`StoreDrone(Drone const&, DroneTimeSeries&, bool create)` writes one transaction:
 
-`Drone` holds one current position; `DroneTimeSeries._position` retains history after successful writes. Its timestamp type is
-`std::chrono::sys_time<std::chrono::milliseconds>`, stored as signed 64-bit UTC
-Unix milliseconds. `DroneTimeSeries._persistedPositions` tracks the stored prefix; corrections
-to an older entry cause that portion to be synchronized again.
+- Insert the client/device only when the snapshot is marked new.
+- Update the existing device name and current-position timestamp.
+- Upsert current `online`, `state`, and `position` attributes.
+- Upsert new or corrected latitude/longitude history.
 
-Drone ID plus timestamp uniquely identifies a latitude/longitude pair in the
-cache. Both coordinates must arrive in the same timeseries message for that
-timestamp. Incomplete messages are rejected; there is no pending-pair buffer.
+Ordinary updates cannot create a device or change its client association. The
+server's C++ `Drone` does not represent client name or device type, so existing
+SQL metadata for those fields is preserved. Application validation rejects
+invalid UUIDs and blank or NUL-containing stored names. An empty name supplied
+in an update means unchanged.
 
-SQLite stores the pair as two string-valued rows named `latitude` and
-`longitude`, updated in one transaction. A unique partial index on
-`(device_id, name, timestamp_ms)` for these names prevents duplicates; replayed
-pairs update existing values. Other metric names are not covered by that index.
-The current `position` attribute stores numeric degrees instead.
+Failed transactions roll back and do not advance history's persisted prefix.
+The cache keeps failed writes and deletions pending for worker retry. A deletion
+tombstone keeps a pending SQL row out of the cache. A successful RPC means cache
+acceptance; pending changes are not durable until SQL commits.
 
-QoS 2 controls MQTT delivery, not database commits. Cached updates can be lost
-on process failure before synchronization. Shutdown attempts a final flush.
-History currently has no automatic eviction policy.
+## Position and history representation
+
+Current position is stored as numeric latitude/longitude in the `position`
+attribute. `device.position_timestamp_ms` holds its signed 64-bit UTC Unix
+millisecond timestamp. Startup restores this current snapshot independently
+from history.
+
+Historical coordinates are two string-valued rows, `latitude` and `longitude`,
+with the same device UUID and timestamp. Cache ingestion requires both in one
+message; incomplete pairs are rejected, with no cross-message pending buffer.
+
+The unique partial index on `(device_id,name,timestamp_ms)` for those two names
+lets replayed or corrected pairs update existing rows. Both coordinates commit
+atomically. Other series names are representable by the schema but are not
+currently supported by the server's cache ingestion.
+
+`DroneTimeSeries._position` retains history after successful writes.
+`_persistedPositions` identifies its stored prefix; correcting an older entry
+rewinds that progress. History corrections do not move current position backward
+in time. There is no automatic history eviction.
 
 ## Constraints and indexes
 
-Client IDs must be `1..4294967295`. Device IDs and dependent foreign keys are
-canonical lowercase non-nil UUID strings. Boolean values are 0 or 1; uint32
-values are `0..4294967295`. String columns reject BLOBs. Each attribute/sample
-has exactly one typed value. Latitude must be `-90..90` and longitude `-180..180`.
+Attributes support bool, string, uint32, and position values. Timeseries support
+bool, string, and uint32 values. Each row must have exactly one matching value
+representation. Bool is 0 or 1, uint32 is `0..4294967295`, latitude is `-90..90`,
+and longitude is `-180..180`. Timestamp columns store UTC Unix milliseconds.
 
 Unique constraints index user client/username and attribute device/name pairs.
-Additional indexes support devices by client and timeseries by device/time or
-device/name/time, plus the coordinate uniqueness index described above.
+Additional indexes cover device client IDs, history device/time and
+device/name/time, and unique coordinate samples.
 
 ## Verification
 
-After building with `BUILD_TESTING=ON`, run from DGCServer:
+From DGCServer after building with `BUILD_TESTING=ON`:
 
 ```sh
 ctest --test-dir build/local --output-on-failure
 ```
 
-The test uses a temporary database and the real cache worker, replacing only the
-MQTT network boundary. It checks simulator batches, routing, rejection of unknown drones,
-coordinate pairing/replay, snapshot persistence, retained history, timestamps,
-validation, rollback, and foreign keys. No broker is required.
-
-## Current-position timestamp
-
-`device.position_timestamp_ms` stores the current position's UTC Unix-millisecond
-timestamp. Its coordinates remain in the position attribute. Startup restores
-this snapshot independently of the retained `DroneTimeSeries` history.
-Historical corrections do not move the current snapshot backward in time.
+`mqtt_persistence` uses a temporary database and the real cache worker while
+replacing the MQTT network boundary. `grpc_cache` exercises RPCs and worker
+behavior through a local listener and temporary database. They cover UUIDs,
+validation, snapshot/history persistence, SQL-only identity discovery,
+transaction rollback, deletion retry, and foreign keys. No MQTT broker is needed.
