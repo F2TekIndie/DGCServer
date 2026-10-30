@@ -67,19 +67,22 @@ mqClient::mqClient( Configuration const& config ) :_config(config), _client(_ioc
 mqClient::~mqClient(){}
 void mqClient::publish( std::string const& topic, std::string const& payload ){
     ++publishCount;
-    if ( topic == dronesdk::mqtt::EP_DEVICE ){
+    if ( !topic.ends_with( "/attributes" ) && !topic.ends_with( "/timeseries" ) ){
         dronegroundcontrol::Device value;
         Require( value.ParseFromString(payload), "Device payload" );
+        Require( topic == "/device/" + value.id(), "Per-drone metadata topic" );
         devices.push_back(value);
     }
-    else if ( topic == dronesdk::mqtt::EP_ATTRIBUTES ){
+    else if ( topic.ends_with( "/attributes" ) ){
         dronegroundcontrol::AttributeRequest value;
         Require( value.ParseFromString(payload), "Attribute payload" );
+        Require( topic == "/device/" + value.device().id() + "/attributes", "Per-drone attributes topic" );
         attributes.push_back(value);
     }
-    else if ( topic == dronesdk::mqtt::EP_TIMESERIES ){
+    else if ( topic.ends_with( "/timeseries" ) ){
         dronegroundcontrol::TimeseriesRequest value;
         Require( value.ParseFromString(payload), "Timeseries payload" );
+        Require( topic == "/device/" + value.device().id() + "/timeseries", "Per-drone timeseries topic" );
         timeseries.push_back(value);
     }
     receiver->HandleMessage( topic, payload );
@@ -100,13 +103,21 @@ int main( int argc, char** argv ){
         auto handler = std::make_unique<dgcSubscriptions>( cache );
         receiver = handler.get();
 
+        const auto subscriptions = handler->Subscriptions();
+        Require( subscriptions.size() == 4, "Four subscription filters" );
+        Require( subscriptions[0].topic_filter == "/device/+", "Metadata filter" );
+        Require( subscriptions[1].topic_filter == "/status", "Status unchanged" );
+        Require( subscriptions[2].topic_filter == "/device/+/attributes", "Attributes filter" );
+        Require( subscriptions[3].topic_filter == "/device/+/timeseries", "Timeseries filter" );
+
         mqClient mqtt( config );
         DroneManager simulator( mqtt );
         const auto firstId = cache->CreateDevice(99)._droneId;
         const auto externalId = NewDroneId();
-        simulator.Init( {firstId} );
-        Require( publishCount == 3, "One device, attribute batch and timeseries batch publish" );
-        Require( devices.size() == 1 && attributes.size() == 1 && timeseries.size() == 1, "Topic routing" );
+        const auto secondId = cache->CreateDevice(99)._droneId;
+        simulator.Init( {firstId, secondId} );
+        Require( publishCount == 6, "Two drones each publish metadata, attributes and timeseries" );
+        Require( devices.size() == 2 && attributes.size() == 2 && timeseries.size() == 2, "Topic routing" );
         Require( devices[0].id() == firstId && devices[0].client_id().id() == 99 && devices[0].name() == "Drone_1", "Device identity" );
         auto const& attributeBatch = attributes[0];
         Require( attributeBatch.device().id() == firstId && !attributeBatch.has_attrib(), "Attribute batch envelope" );
@@ -122,11 +133,42 @@ int main( int argc, char** argv ){
         Require( latitude.name() == "latitude" && latitude.has_svalue(), "Latitude sample" );
         Require( longitude.name() == "longitude" && longitude.has_svalue(), "Longitude sample" );
         Require( latitude.timestamp() == longitude.timestamp() && std::stoll(latitude.timestamp()) > 0, "Shared timestamp" );
-        for (auto const* topic : {&dronesdk::mqtt::EP_DEVICE, &dronesdk::mqtt::EP_ATTRIBUTES, &dronesdk::mqtt::EP_TIMESERIES}){
-            handler->HandleMessage( *topic, std::string(1, '\xff') );
+        for (auto const& topic : {dronesdk::mqtt::DeviceTopic(firstId), dronesdk::mqtt::AttributesTopic(firstId), dronesdk::mqtt::TimeseriesTopic(firstId)}){
+            handler->HandleMessage( topic, std::string(1, '\xff') );
         }
         handler->HandleMessage( "/unknown", "ignored" );
-        Require( devices.size() == 1 && attributes.size() == 1 && timeseries.size() == 1, "Invalid payloads must not reach cache" );
+        Require( devices.size() == 2 && attributes.size() == 2 && timeseries.size() == 2, "Invalid payloads must not reach cache" );
+
+        // Routing uses the topic shape, while the payload remains authoritative for identity.
+        auto renamed = devices[0];
+        renamed.set_name("Payload identity");
+        handler->HandleMessage("/device/" + externalId, renamed.SerializeAsString());
+        Require(cache->GetDrone(devices[0])->_Drone._name == "Payload identity", "Metadata uses payload identity");
+        auto topicDevice = devices[0];
+        topicDevice.set_id(externalId);
+        Require(!cache->GetDrone(topicDevice), "Topic identity does not create or select a drone");
+        auto changed = attributes[0];
+        changed.mutable_attributes()->mutable_timeseries(1)->set_ivalue(5);
+        handler->HandleMessage("/device/" + externalId + "/attributes", changed.SerializeAsString());
+        Require(cache->GetDrone(devices[0])->_Drone._state == 5, "Attributes use payload identity");
+        auto changedHistory = timeseries[0];
+        changedHistory.mutable_timeseries()->mutable_timeseries(0)->set_svalue("0");
+        handler->HandleMessage("/device/" + externalId + "/timeseries", changedHistory.SerializeAsString());
+        Require(cache->GetDrone(devices[0])->_Drone._position._posLat == 0, "Timeseries use payload identity");
+        Require(cache->GetDrone(devices[0])->_TimeSeries._position.size() == 1, "Timeseries routed and replay deduplicated");
+        const auto nameBeforeInvalidTopics = cache->GetDrone(devices[0])->_Drone._name;
+        renamed.set_name("Unsupported route");
+        for (auto const& topic : {std::string("/device"), std::string("/device/"), std::string("/device//attributes"),
+                                 "/device/" + firstId + "/", "/device/" + firstId + "/attribute",
+                                 "/device/" + firstId + "/attributes/extra", std::string("/device/+/attributes"),
+                                 std::string("/status")}){
+            handler->HandleMessage(topic, renamed.SerializeAsString());
+        }
+        Require(cache->GetDrone(devices[0])->_Drone._name == nameBeforeInvalidTopics, "Unsupported topic shapes ignored");
+        Require(cache->GetDrone(devices[1])->_Drone._name == "Drone_2", "Other drone unchanged");
+        handler->HandleMessage("/device/" + firstId, devices[0].SerializeAsString());
+        handler->HandleMessage("/device/" + firstId + "/attributes", attributes[0].SerializeAsString());
+        handler->HandleMessage("/device/" + firstId + "/timeseries", timeseries[0].SerializeAsString());
 
         // Valid telemetry cannot register an unknown drone.
         auto unknown = devices[0];
@@ -147,7 +189,6 @@ int main( int argc, char** argv ){
 
         // Incomplete coordinate messages are rejected, not stored as pending.
         auto pair = timeseries[0];
-        const auto secondId = cache->CreateDevice(99)._droneId;
         pair.mutable_device()->set_id(secondId);
         auto incomplete = pair;
         incomplete.mutable_timeseries()->mutable_timeseries()->RemoveLast();

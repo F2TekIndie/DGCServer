@@ -10,6 +10,7 @@
 #include <boost/mqtt5/logger.hpp>
 #include <thread>
 #include <variant>
+#include <algorithm>
 
 
 
@@ -69,7 +70,7 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
         auto subscribe = [this]() -> boost::asio::awaitable<bool> {
             // Configure the request to subscribe to a Topic.
             std::vector<boost::mqtt5::subscribe_topic> topics = _subscriptionHandler->Subscriptions();
-            // Subscribe to a single Topic.
+            // Subscribe to all topic filters.
             auto&& [ec, sub_codes, sub_props] = co_await _client.async_subscribe(
                 topics, boost::mqtt5::subscribe_props {}, use_nothrow_awaitable
             );
@@ -83,7 +84,10 @@ void mqClient::subscribe( std::shared_ptr<ISubsciptionHandler> pHandler ){
                 }
             }
 
-            co_return !ec && !sub_codes[0]; // True if the subscription was successfully established.
+            co_return !ec && !topics.empty() && sub_codes.size() == topics.size()
+                && std::all_of( sub_codes.begin(), sub_codes.end(), []( auto const& code ){
+                    return !code;
+                } );
         };
         //
         auto subscribe_and_receive = [this, subscribe]() -> boost::asio::awaitable<void> {

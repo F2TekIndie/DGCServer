@@ -6,6 +6,7 @@
 #include "attributes.pb.h"
 #include "timeseries.pb.h"
 #include <stdexcept>
+#include <string_view>
 
 
 
@@ -21,23 +22,37 @@ dgcSubscriptions::~dgcSubscriptions()
 
 std::vector<boost::mqtt5::subscribe_topic> dgcSubscriptions::Subscriptions() const{
     std::vector<boost::mqtt5::subscribe_topic> topics = {
-        {dronesdk::mqtt::EP_DEVICE, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
+        {dronesdk::mqtt::DEVICE_FILTER, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
         ,{dronesdk::mqtt::EP_STATUS, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
-        ,{dronesdk::mqtt::EP_ATTRIBUTES, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
-        ,{dronesdk::mqtt::EP_TIMESERIES, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
+        ,{dronesdk::mqtt::ATTRIBUTES_FILTER, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
+        ,{dronesdk::mqtt::TIMESERIES_FILTER, boost::mqtt5::subscribe_options {boost::mqtt5::qos_e::exactly_once, boost::mqtt5::no_local_e::no, boost::mqtt5::retain_as_published_e::dont, boost::mqtt5::retain_handling_e::send}}
     };
     return topics;
 }
 
 void dgcSubscriptions::HandleMessage( std::string sTopic, std::string sMessage ){
     try {
-        if ( sTopic == dronesdk::mqtt::EP_DEVICE ){
+        // The topic selects the message type; identity still comes from the payload.
+        std::string_view topic( sTopic );
+        if ( !topic.starts_with( "/device/" ) ){
+            std::cerr << "Ignoring unsupported MQTT topic: " << sTopic << '\n';
+            return;
+        }
+        topic.remove_prefix( 8 );
+        const auto separator = topic.find( '/' );
+        const auto id = topic.substr( 0, separator );
+        if ( id.empty() || id.find_first_of( "+#" ) != std::string_view::npos ){
+            std::cerr << "Ignoring unsupported MQTT topic: " << sTopic << '\n';
+            return;
+        }
+        const auto suffix = separator == std::string_view::npos ? std::string_view{} : topic.substr( separator );
+        if ( suffix.empty() ){
             HandleDevice(sMessage);
         }
-        else if ( sTopic == dronesdk::mqtt::EP_ATTRIBUTES ){
+        else if ( suffix == "/attributes" ){
             HandleAttributes(sMessage);
         }
-        else if ( sTopic == dronesdk::mqtt::EP_TIMESERIES ){
+        else if ( suffix == "/timeseries" ){
             HandleTimeseries(sMessage);
         }
         else {

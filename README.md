@@ -192,14 +192,19 @@ An empty history range returns a successful empty collection.
 
 ## MQTT telemetry
 
-Subscriptions use these exact topics; there are no wildcard subscriptions:
+Publishers use per-drone topics. The server subscribes to `/device/+`,
+`/device/+/attributes`, `/device/+/timeseries`, and `/status`:
 
 | Topic | Protobuf payload | Supported data |
 | --- | --- | --- |
-| `/device` | `Device` | Existing device/client identity and nonempty name updates. |
-| `/device/attribute` | `AttributeRequest` | `online` bool, `state` uint32, or `position`. |
-| `/device/timeseries` | `TimeseriesRequest` | String-valued latitude/longitude samples sharing timestamps. |
+| `/device/<uuid>` | `Device` | Existing device/client identity and nonempty name updates. |
+| `/device/<uuid>/attributes` | `AttributeRequest` | `online` bool, `state` uint32, or `position`. |
+| `/device/<uuid>/timeseries` | `TimeseriesRequest` | String-valued latitude/longitude samples sharing timestamps. |
 | `/status` | Undefined | Subscribed, but unsupported by the handler. |
+
+The topic structure selects the payload type. Drone and client identity still
+come from the payload; the topic UUID is not used for cache lookup or compared
+with the payload UUID. Unsupported topic structures are ignored.
 
 Coordinates use decimal strings with round-trip double precision. Timestamp
 strings are signed 64-bit UTC Unix milliseconds. A timeseries message must
@@ -208,9 +213,9 @@ a lone coordinate sample is rejected. Send either the single-value field or a
 nonempty batch, not both. Validation completes before the cache entry changes.
 
 Publishing and subscriptions use QoS 2, subject to broker approval. Publishing
-also uses RETAIN. Each shared topic retains only its latest payload, not a
-separate payload per drone. Retained MQTT data cannot restore the entire fleet;
-startup state comes from SQLite. QoS 2 is a transport guarantee, not an SQL commit
+also uses RETAIN. Each drone has a separate retained message for each topic
+category. Retained timeseries contain only the latest published batch, not full
+history, and may be replayed on subscription. Startup state comes from SQLite. QoS 2 is a transport guarantee, not an SQL commit
 acknowledgment or a substitute for database uniqueness.
 
 ## Diagnostics and current limitations
@@ -218,8 +223,6 @@ acknowledgment or a substitute for database uniqueness.
 - Configuration parsing and authentication are not implemented.
 - MQTT disconnect is posted immediately before stopping the Asio context;
   protocol-level disconnect completion is not guaranteed.
-- Subscription handling logs all results but checks only the first result to
-  decide success.
 - gRPC listener startup failure is logged, but `main` still returns zero.
 - The simulator assumes successful discovery of at least 100 client-99 drones;
   its empty-result error path is not handled gracefully by `main`.

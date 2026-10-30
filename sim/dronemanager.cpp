@@ -166,7 +166,7 @@ void DroneManager::Update(double dtSeconds){
 
 
 void DroneManager::UpdateDevice( Drone const& drone ){
-    PublishMessage(_mqttClient, dronesdk::mqtt::EP_DEVICE, MakeDevice(drone));
+    PublishMessage(_mqttClient, dronesdk::mqtt::DeviceTopic( drone._droneId ), MakeDevice(drone));
 }
 
 void DroneManager::UpdateAttributes( Drone const& drone ){
@@ -181,7 +181,7 @@ void DroneManager::UpdateAttributes( Drone const& drone ){
     attribute = attributes->add_timeseries();
     attribute->set_name("state");
     attribute->set_ivalue(drone._state);
-    PublishMessage(_mqttClient, dronesdk::mqtt::EP_ATTRIBUTES, message);
+    PublishMessage(_mqttClient, dronesdk::mqtt::AttributesTopic( drone._droneId ), message);
 }
 
 void DroneManager::UpdateTimeseries( Drone const& drone ){
@@ -200,5 +200,5 @@ void DroneManager::UpdateTimeseries( Drone const& drone ){
     sample->set_timestamp(std::to_string(timestamp));
     sample->set_name("longitude");
     sample->set_svalue(CoordinateString(drone._position._posLang));
-    PublishMessage(_mqttClient, dronesdk::mqtt::EP_TIMESERIES, message);
+    PublishMessage(_mqttClient, dronesdk::mqtt::TimeseriesTopic( drone._droneId ), message);
 }
