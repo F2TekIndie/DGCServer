@@ -11,6 +11,15 @@
 
 
 //
+enum DroneState{
+    DS_INIT     = 0,
+    DS_OFFLINE  = 1,
+    DS_ONLINE   = 2,
+    DS_GROUNDED = 3,
+    DS_STATIONARY   = 4,
+    DS_TRAVELING    = 5
+};
+//
 struct TimeseriesPos{
     std::chrono::sys_time<std::chrono::milliseconds> _timestamp;
     double _posLang;

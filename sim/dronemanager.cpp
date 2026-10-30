@@ -26,15 +26,6 @@
 namespace{
     constexpr uint32_t SimulationCliendId = 99;
     //
-    enum DroneState{
-        DS_INIT     = 0,
-        DS_OFFLINE  = 1,
-        DS_ONLINE   = 2,
-        DS_GROUNDED = 3,
-        DS_STATIONARY   = 4,
-        DS_TRAVELING    = 5
-    };
-    //
     dronegroundcontrol::Device MakeDevice(Drone const& drone){
         dronegroundcontrol::Device message;
         message.set_id(drone._droneId);
@@ -119,7 +110,7 @@ void DroneManager::Init( std::vector<std::string> const& ids ){
         throw std::invalid_argument("Simulator requires distinct registered drone UUIDs");
     }
     // Resize
-    _drones.resize( nCount, {{}, SimulationCliendId, "Drone_", DS_INIT, false, {std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 10.08, 58.08}, 0.0, 5.0 } );
+    _drones.resize( nCount, {{}, SimulationCliendId, "Drone_", DroneState::DS_INIT, false, {std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()), 13.40, 52.52}, 0.0, 5.0 } );
     // Init
     std::uniform_real_distribution<double> heading{ 0.0, 2.0*std::numbers::pi };
     std::uniform_real_distribution<double> speed{ 2.0, 12.0 };
@@ -145,19 +136,19 @@ void DroneManager::Update(double dtSeconds){
         {
             _drones[ nRandIndex ]._online = true;
             // If already ONLINE => Grounded || Stationary || Traveling
-            if ( _drones[ nRandIndex ]._state == DS_ONLINE ){
+            if ( _drones[ nRandIndex ]._state == DroneState::DS_ONLINE ){
                 int n = _states( _rng );
                 _drones[ nRandIndex ]._state = DroneState(3 + n);
             }
             else{
-                _drones[ nRandIndex ]._state = DS_ONLINE;
+                _drones[ nRandIndex ]._state = DroneState::DS_ONLINE;
             }
         }
         // If offline
         else
         {
             _drones[ nRandIndex ]._online = false;
-            _drones[ nRandIndex ]._state = DS_OFFLINE;
+            _drones[ nRandIndex ]._state = DroneState::DS_OFFLINE;
         }
         //
         UpdateAttributes( _drones[ nRandIndex ] );
